@@ -661,6 +661,7 @@ class TikTokAccount {
 
   async newPage({ light = false } = {}) {
     const page = await this.context.newPage();
+    page.__light = light;
     page.setDefaultNavigationTimeout(CONFIG.browser.navTimeoutMs);
     await page.setUserAgent(UA);
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
@@ -670,7 +671,7 @@ class TikTokAccount {
       const t = r.resourceType();
       const skip =
         t === 'image' || t === 'media' || t === 'font' || t === 'manifest' || t === 'texttrack' ||
-        (light && t === 'stylesheet') ||
+        (page.__light && t === 'stylesheet') ||
         /\.(mp4|webm|m3u8|jpe?g|png|webp|gif|woff2?)(\?|$)/i.test(r.url()) ||
         /google-analytics|googletagmanager|doubleclick|facebook\.net|analytics\.tiktok\.com|ads\.tiktok\.com/i.test(r.url());
       if (skip) r.abort().catch(() => {});
@@ -833,6 +834,13 @@ class TikTokAccount {
   }
 
   async withUiPage(fn) {
+    if (CONFIG.lowMemory) {
+      // One TikTok tab only. Any tiktok.com page keeps signing requests, so it can stay on the
+      // profile afterwards; it just needs TikTok's styling so menus and dialogs behave normally.
+      const page = await this.ensureApiPage();
+      page.__light = false;
+      return fn(page);
+    }
     let page = this.uiFree.pop();
     if (!page) {
       if (this.uiPages.length < CONFIG.block.uiPages) {
@@ -925,6 +933,8 @@ class TikTokAccount {
   }
 
   async blockViaUi(page, handle) {
+    const step = (t) => this.session.step(t);
+    step(`Opening @${handle}'s profile (first block only; slow on small servers)…`);
     await page.goto(`https://www.tiktok.com/@${encodeURIComponent(handle)}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 20000 }).catch(() => {});
     if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
@@ -937,6 +947,7 @@ class TikTokAccount {
       return { ok: false, code: 'not_found', note: `@${handle} doesn't exist or is banned (TikTok code ${detail.statusCode})` };
     }
 
+    step("Waiting for TikTok's profile page to finish loading…");
     // On slow servers TikTok's buttons exist long before they respond to clicks. Wait until the
     // page has finished wiring them up (React attaches its handlers to the element).
     await page
@@ -967,6 +978,7 @@ class TikTokAccount {
       .catch(() => null);
 
     try {
+      step('Opening the … menu…');
       // Open the "…" menu and wait for the Block item to show up.
       if (!(await waitForClick(page, { selectors: MORE_SELECTORS, hoverOnly: true }, 8000))) {
         return { ok: false, code: 'ui_changed', note: "Couldn't find the … menu on the profile page", ids };
@@ -978,6 +990,7 @@ class TikTokAccount {
       }
       if (!clickedMenu) return { ok: false, code: 'ui_changed', note: "Couldn't find Block in the profile menu", ids };
 
+      step('Confirming Block…');
       // Wait for the confirmation box, then press its Block button.
       const confirmed = await waitForClick(
         page,
@@ -986,6 +999,7 @@ class TikTokAccount {
       );
       if (!confirmed) await clickTarget(page, { texts: BLOCK_WORDS });
 
+      step("Waiting for TikTok's answer…");
       // The request goes out right after confirming, so don't wait long once that's done.
       const resp = await Promise.race([responseP, delay(CONFIG.block.uiAfterConfirmMs).then(() => null)]);
       if (!resp) {
@@ -1003,6 +1017,7 @@ class TikTokAccount {
         templates.data[this.me.uid] = { ...learnTemplate(resp.request(), ids), source: 'profile' };
         templates.save();
         log.info(`[${this.session.username}] Learned TikTok's block request (${new URL(resp.url()).pathname}) — fast mode on.`);
+        step('Learned it. Blocking the rest in fast mode…');
       }
       return { ...verdict, ids };
     } finally {
@@ -1017,39 +1032,44 @@ class TikTokAccount {
 
   async block(handle) {
     lastBrowserUse = Date.now();
-    const ids = await this.resolveIds(handle);
-    if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
-
-    if (ids && this.fastHealthy) {
-      const r = await this.sendBlock(this.template, ids);
-      if (r.ok || r.code === 'rate_limited') {
-        if (r.ok && this.template.failures) ((this.template.failures = 0), templates.save());
-        return { ...r, vector: 'fast', ids };
+    if (this.fastHealthy) {
+      const ids = await this.resolveIds(handle);
+      if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
+      if (ids) {
+        const r = await this.sendBlock(this.template, ids);
+        if (r.ok || r.code === 'rate_limited') {
+          if (r.ok && this.template.failures) ((this.template.failures = 0), templates.save());
+          return { ...r, vector: 'fast', ids };
+        }
+        this.template.failures++;
+        templates.save();
       }
-      this.template.failures++;
-      templates.save();
+      if (this.fastHealthy) return this.uiBlock(handle);
     }
 
-    if (!this.fastHealthy) {
-      // Until we know a working request, one worker at a time works it out; the rest then go fast.
-      return this.learn(async () => {
-        if ((this.session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop) {
-          return { ok: false, code: 'stopped', note: this.session.uiStopNote || 'Stopped', vector: 'profile' };
-        }
-        if (ids && this.fastHealthy) {
-          const r = await this.sendBlock(this.template, ids);
-          if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
-        }
-        if (ids && !this.probed) {
-          this.probed = true;
-          const r = await this.probeGuesses(ids);
-          if (r) return { ...r, ids };
-        }
-        return this.uiBlock(handle);
-      });
-    }
-    return this.uiBlock(handle);
+    // The block request isn't known (or stopped working). One worker works it out through the
+    // profile page while the others wait, then they all go fast. Nothing else touches the tab meanwhile.
+    return this.learn(async () => {
+      if ((this.session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop) {
+        return { ok: false, code: 'stopped', note: this.session.uiStopNote || 'Stopped', vector: 'profile' };
+      }
+      if (!this.fastHealthy) this.session.step(`Looking up @${handle}…`);
+      const ids = await this.resolveIds(handle);
+      if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
+      if (ids && this.fastHealthy) {
+        const r = await this.sendBlock(this.template, ids);
+        if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
+      }
+      if (ids && !this.probed) {
+        this.probed = true;
+        this.session.step('Trying a direct block request…');
+        const r = await this.probeGuesses(ids);
+        if (r) return { ...r, ids };
+      }
+      return this.uiBlock(handle);
+    });
   }
+
 }
 
 // ============================================================================
@@ -1102,6 +1122,12 @@ class ClientSession {
         this.sseClients.delete(res);
       }
     }
+  }
+
+  step(text) {
+    this.currentStep = text;
+    this.broadcast({ type: 'STEP', step: text });
+    log.info(`[${this.username}] ${text}`);
   }
 
   recordAttempt(entry) {
@@ -1221,6 +1247,7 @@ function createJob(session, handles, kind = 'manual') {
 function finishJobIfDone(session, job) {
   if (job.status !== 'running') return;
   if (job.processed + job.cancelledCount >= job.total) {
+    if (session.currentStep) session.step('');
     job.status = job.cancelRequested ? 'cancelled' : 'done';
     job.currentUsername = null;
     job.finishedAt = Date.now();
@@ -1449,6 +1476,7 @@ function snapshot(s) {
     jobs: [...s.jobs.values()].filter((j) => j.kind === 'manual').slice(-1).map(publicJob),
     attempts: s.attempts.slice(-60),
     engine: { ...engineStatus },
+    step: s.currentStep || '',
   };
 }
 
