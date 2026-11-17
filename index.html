@@ -159,6 +159,7 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
 .acct-box span { font-size: 12px; color: var(--muted); }
 .form-msg { font-size: 12.5px; padding: 10px 12px; border-radius: var(--r-xs); margin: -4px 0 16px; border: 1px solid; }
 .form-msg.err { color: var(--amber); border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.06); }
+.form-msg.info { color: var(--cyan); border-color: rgba(45,226,208,0.3); background: var(--cyan-soft); }
 
 .diag-wrap { overflow-y: auto; max-height: 380px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--void); margin-bottom: 16px; }
 .diag-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
@@ -328,12 +329,13 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
       <div><b id="acct-name"></b><span id="acct-sub"></span></div>
     </div>
     <ol class="steps">
-      <li>Open tiktok.com in Chrome and log in.</li>
-      <li>Press F12, open Application, then Cookies, then https://www.tiktok.com.</li>
+      <li>Open tiktok.com in any browser (Opera GX, Chrome, Edge, Brave…) and log in.</li>
+      <li>Press Ctrl+Shift+I, open the Application tab, then Cookies, then https://www.tiktok.com.</li>
       <li>Copy the value of <code>sessionid</code> (or paste the whole Cookie header).</li>
     </ol>
     <label class="field-label" for="tt-cookie-input">Cookie or sessionid</label>
     <input type="password" id="tt-cookie-input" class="modal-input" placeholder="Paste full Cookie header or sessionid…" autocomplete="off">
+    <div class="form-msg info" id="acct-engine" hidden></div>
     <div class="form-msg err" id="acct-err" hidden></div>
     <div class="modal-actions">
       <button class="btn btn-danger" id="btn-acct-logout">Disconnect Account</button>
@@ -382,7 +384,7 @@ let SESSION_ID = store.get('nexusSessionId');
 
 const S = {
   sharers: new Map(), blacklist: new Set(), live: { connected: false }, auth: { loggedIn: false },
-  job: null, attempts: [], fresh: new Set(), visible: [], jobStartedAt: 0,
+  job: null, attempts: [], fresh: new Set(), visible: [], jobStartedAt: 0, engine: { state: 'idle' },
 };
 let es = null;
 
@@ -551,6 +553,22 @@ function renderDiagnostics() {
   </tr>`).join('') : '<tr><td colspan="6" style="padding:14px; text-align:center; color:var(--muted)">No block attempts yet.</td></tr>';
 }
 
+/* ---- server browser setup ---- */
+let engineToastShown = false;
+function renderEngine() {
+  const e = S.engine || {};
+  const box = $('acct-engine');
+  if (e.state === 'downloading') {
+    box.hidden = false;
+    box.textContent = `Setting up the server's browser (first start only): ${e.progress || 0}%. You can connect once this finishes.`;
+    if (!engineToastShown) { engineToastShown = true; showToast('The server is downloading its browser (first start only). Blocking is available in about a minute.', 'info'); }
+  } else if (e.state === 'finding') {
+    box.hidden = false; box.textContent = 'Starting the server\'s browser…';
+  } else box.hidden = true;
+  if (e.state === 'error' && e.message && $('acct-modal').classList.contains('open')) { $('acct-err').hidden = false; $('acct-err').textContent = e.message; }
+  if (e.state === 'ready' && engineToastShown) { engineToastShown = false; showToast('Server browser ready.', 'success'); }
+}
+
 /* ================= STREAM ================= */
 function applySnapshot(d) {
   if (d.state) S.live = d.state;
@@ -559,6 +577,7 @@ function applySnapshot(d) {
   if (Array.isArray(d.sharers)) { S.sharers.clear(); d.sharers.forEach((u) => S.sharers.set(u.uniqueId, u)); }
   if (Array.isArray(d.attempts)) S.attempts = d.attempts;
   if (d.jobs?.[0]?.status === 'running') { S.job = d.jobs[0]; renderJob(); }
+  if (d.engine) { S.engine = d.engine; renderEngine(); }
   renderStatus(); renderMetricsFromAttempts(); renderDiagnostics(); queueRender();
 }
 
@@ -575,6 +594,7 @@ function initStream() {
       case 'SHARE': S.sharers.set(d.user.uniqueId, d.user); S.fresh.add(d.user.uniqueId); queueRender(); break;
       case 'CLEAR': S.sharers.clear(); queueRender(); break;
       case 'JOB': onJob(d.job); break;
+      case 'ENGINE': S.engine = d.engine; renderEngine(); break;
       case 'ATTEMPT':
         S.attempts.push(d.attempt);
         if (S.attempts.length > 300) S.attempts.shift();
@@ -746,6 +766,7 @@ function openAccount() {
   }
   $('btn-acct-logout').hidden = !a.loggedIn;
   openModal('acct-modal');
+  renderEngine();
 }
 
 async function connectAccount(cookie, { quiet = false } = {}) {
