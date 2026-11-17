@@ -1,7 +1,7 @@
 {
-  "name": "nexus-tiktok",
-  "version": "1.0.0",
-  "description": "Standalone TikTok Live Listener & Fast-Blocker",
+  "name": "nexus-tiktok-engine",
+  "version": "2.0.0",
+  "description": "Multi-Tenant TikTok Live Listener & Fast-Blocker",
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=1024 server.js"
