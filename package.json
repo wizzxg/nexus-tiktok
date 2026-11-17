@@ -1,9 +1,11 @@
 {
   "name": "nexus-tiktok-engine",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Multi-Tenant TikTok Live Listener & Fast-Blocker",
   "main": "server.js",
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "start": "node --max-old-space-size=1024 server.js"
   },
@@ -12,8 +14,5 @@
     "express": "^5.2.1",
     "puppeteer": "^25.18.1",
     "tiktok-live-connector": "^2.5.0"
-  },
-  "puppeteer": {
-    "cacheDirectory": ".cache/puppeteer"
   }
 }
