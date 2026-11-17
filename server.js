@@ -476,33 +476,81 @@ async function hasCaptcha(page) {
 }
 
 /** XHR from inside the TikTok page, so TikTok's SDK adds its signatures. */
-async function pageXhr(page, { method = 'GET', url, body = null, contentType = null }) {
+/**
+ * Sends a request from inside the TikTok tab so TikTok's own security script signs it.
+ * TikTok's web app sends its API calls with fetch(), and that's what its script hooks, so
+ * 'fetch' is the default; 'xhr' is kept as a fallback for setups where the script hooks XHR.
+ */
+async function pageRequest(page, { method = 'GET', url, body = null, contentType = null, transport = 'fetch' }) {
   return page.evaluate(
-    (o) =>
-      new Promise((resolve) => {
-        let finalUrl = o.url;
-        if (finalUrl.includes('{{msToken}}')) {
-          const m = /(?:^|;\s*)msToken=([^;]+)/.exec(document.cookie);
-          let tok = m ? m[1] : '';
-          try {
-            tok = tok || localStorage.getItem('xmst') || '';
-          } catch {}
-          finalUrl = tok
-            ? finalUrl.replace('{{msToken}}', encodeURIComponent(decodeURIComponent(tok)))
-            : finalUrl.replace(/[?&]msToken=\{\{msToken\}\}/, '');
+    async (o) => {
+      let finalUrl = o.url;
+      if (finalUrl.includes('{{msToken}}')) {
+        const m = /(?:^|;\s*)msToken=([^;]+)/.exec(document.cookie);
+        let tok = m ? m[1] : '';
+        try {
+          tok = tok || localStorage.getItem('xmst') || '';
+        } catch {}
+        finalUrl = tok
+          ? finalUrl.replace('{{msToken}}', encodeURIComponent(decodeURIComponent(tok)))
+          : finalUrl.replace(/[?&]msToken=\{\{msToken\}\}/, '');
+      }
+      if (o.transport === 'fetch') {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 15000);
+        try {
+          const r = await fetch(finalUrl, {
+            method: o.method,
+            credentials: 'include',
+            headers: o.contentType ? { 'Content-Type': o.contentType } : {},
+            body: o.method === 'GET' ? undefined : o.body || undefined,
+            signal: ctrl.signal,
+          });
+          return { status: r.status, text: await r.text() };
+        } catch (e) {
+          return { status: 0, text: '', error: String(e && e.message) };
+        } finally {
+          clearTimeout(timer);
         }
+      }
+      return await new Promise((resolve) => {
         const x = new XMLHttpRequest();
         x.open(o.method, finalUrl, true);
         x.withCredentials = true;
         if (o.contentType) x.setRequestHeader('Content-Type', o.contentType);
-        x.timeout = 12000;
+        x.timeout = 15000;
         x.onload = () => resolve({ status: x.status, text: x.responseText || '' });
         x.onerror = () => resolve({ status: 0, text: '', error: 'network error' });
         x.ontimeout = () => resolve({ status: 0, text: '', error: 'timeout' });
         x.send(o.body);
-      }),
-    { method, url, body, contentType }
+      });
+    },
+    { method, url, body, contentType, transport }
   );
+}
+const pageXhr = (page, opts) => pageRequest(page, { transport: 'xhr', ...opts });
+
+/**
+ * Reads a profile's IDs from the profile page's HTML without opening or rendering it
+ * (a plain same-site download from the TikTok tab, so it carries the account's login).
+ */
+async function pageProfileLookup(page, handle) {
+  return page.evaluate(async (h) => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 20000);
+      const r = await fetch(`https://www.tiktok.com/@${encodeURIComponent(h)}`, { credentials: 'include', signal: ctrl.signal });
+      const html = await r.text();
+      clearTimeout(timer);
+      const m = /<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+      if (!m) return { status: r.status, noData: true };
+      const detail = JSON.parse(m[1])?.__DEFAULT_SCOPE__?.['webapp.user-detail'];
+      const u = detail?.userInfo?.user;
+      return { status: r.status, statusCode: detail?.statusCode, id: u?.id || '', secUid: u?.secUid || '', nickname: u?.nickname || '', hasDetail: Boolean(detail) };
+    } catch (e) {
+      return { status: 0, error: String(e && e.message) };
+    }
+  }, handle);
 }
 
 /** Finds a visible element by selector or exact text and clicks it with real mouse events. */
@@ -603,8 +651,36 @@ function learnTemplate(req, ids) {
     url,
     body: swap(req.postData() || ''),
     contentType: headers['content-type'] || null,
+    transport: req.resourceType() === 'xhr' ? 'xhr' : 'fetch',
     learnedAt: Date.now(),
     failures: 0,
+  };
+}
+
+/** What the dashboard may keep: the request shape only (no cookies, no signatures). */
+function publicTemplate(t) {
+  if (!t) return null;
+  return { url: t.url, body: t.body || '', contentType: t.contentType || null, transport: t.transport || 'fetch', source: t.source || '' };
+}
+
+/** Accepts a request shape the dashboard saved earlier, if it looks like a TikTok block request. */
+function acceptSavedTemplate(t) {
+  if (!t || typeof t !== 'object' || typeof t.url !== 'string' || t.url.length > 4000) return null;
+  let u;
+  try {
+    u = new URL(t.url.replace(/\{\{\w+\}\}/g, 'x'));
+  } catch {
+    return null;
+  }
+  const body = typeof t.body === 'string' ? t.body.slice(0, 4000) : '';
+  if (u.protocol !== 'https:' || !/(^|\.)tiktok\.com$/i.test(u.hostname) || !/block/i.test(u.pathname) || /unblock/i.test(u.pathname)) return null;
+  if (!/\{\{(uid|sec)\}\}/.test(t.url + body)) return null;
+  return {
+    url: t.url,
+    body,
+    contentType: typeof t.contentType === 'string' ? t.contentType.slice(0, 120) : null,
+    transport: t.transport === 'xhr' ? 'xhr' : 'fetch',
+    source: 'saved',
   };
 }
 
@@ -640,8 +716,9 @@ function mutex() {
   };
 }
 
-// Lightest first. /explore is TikTok's full web app and always has the security script.
-const HOME_CANDIDATES = ['https://www.tiktok.com/legal/page/global/terms-of-service/en', 'https://www.tiktok.com/explore'];
+// /explore is TikTok's full web app and always has the security script. (A lighter page was
+// tried first before, but it cost a wasted load plus a 20 s wait after every restart.)
+const HOME_CANDIDATES = ['https://www.tiktok.com/explore'];
 
 class TikTokAccount {
   constructor(session, cookies) {
@@ -655,6 +732,8 @@ class TikTokAccount {
     this.learn = mutex(); // only one worker figures out the block request at a time
     this.probed = false;
     this.detailWorks = false;
+    this.transport = 'fetch'; // switches to 'xhr' if that's what TikTok's script signs here
+    this.uiBusy = null; // while the shared tab is on a profile page, API calls wait for it
     this.me = null;
     this.ready = false;
   }
@@ -890,44 +969,95 @@ class TikTokAccount {
   }
 
   /** Returns ids, or { missing: note } when TikTok says the account doesn't exist, or null if unknown. */
+  /** Runs a request in the TikTok tab; waits out (and retries after) a profile-page step on the shared tab. */
+  async api(opts) {
+    for (let attempt = 1; ; attempt++) {
+      if (this.uiBusy) await this.uiBusy.catch(() => {});
+      const page = await this.ensureApiPage();
+      try {
+        return await pageRequest(page, opts);
+      } catch (e) {
+        if (attempt < 3 && /context was destroyed|detached|navigat|Target closed/i.test(e.message)) {
+          await delay(400);
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
+
+  /** Returns ids, or { missing: note } when TikTok says the account doesn't exist, or null if unknown. */
   async resolveIds(handle) {
     const known = knownProfile(handle);
     if (known) return known;
-    const page = await this.ensureApiPage();
+
+    // 1) TikTok's user-detail API, signed by the tab. Try the transport that worked last first.
     const url = `https://www.tiktok.com/api/user/detail/?aid=1988&app_language=en&app_name=tiktok_web&device_platform=web_pc&uniqueId=${encodeURIComponent(handle)}&secUid=&msToken={{msToken}}`;
-    const r = await pageXhr(page, { url }).catch(() => null);
-    const j = safeJson(r?.text);
-    const u = j?.userInfo?.user;
-    if (u?.id && u?.secUid) {
-      this.detailWorks = true;
-      rememberProfile(handle, { userId: u.id, secUid: u.secUid, nickname: u.nickname });
+    // Skip the API entirely once it has clearly never worked here and the page-text lookup does.
+    const skipApi = !this.detailWorks && (this.detailMisses || 0) >= 3 && this.lookupWorks;
+    const order = skipApi ? [] : this.detailWorks ? [this.transport] : [this.transport, this.transport === 'fetch' ? 'xhr' : 'fetch'];
+    for (const transport of order) {
+      const r = await this.api({ url, transport }).catch(() => null);
+      const j = safeJson(r?.text);
+      const u = j?.userInfo?.user;
+      if (u?.id && u?.secUid) {
+        if (!this.detailWorks) log.info(`[${this.session.username}] User lookups work (${transport}).`);
+        this.detailWorks = true;
+        this.lookupWorks = true;
+        this.transport = transport;
+        rememberProfile(handle, { userId: u.id, secUid: u.secUid, nickname: u.nickname });
+        return knownProfile(handle);
+      }
+      if (this.detailWorks && j && Number(j.statusCode) && !u?.id) {
+        return { missing: `@${handle} doesn't exist or is banned (TikTok code ${j.statusCode})` };
+      }
+    }
+    if (order.length && !this.detailWorks) this.detailMisses = (this.detailMisses || 0) + 1;
+
+    // 2) The profile page's own data, downloaded as text (no rendering, so it's quick even on small servers).
+    if (this.uiBusy) await this.uiBusy.catch(() => {});
+    const page = await this.ensureApiPage();
+    const p = await pageProfileLookup(page, handle).catch(() => null);
+    if (p?.id && p?.secUid) {
+      this.lookupWorks = true;
+      rememberProfile(handle, { userId: p.id, secUid: p.secUid, nickname: p.nickname });
       return knownProfile(handle);
     }
-    if (this.detailWorks && j && Number(j.statusCode) && !u?.id) {
-      return { missing: `@${handle} doesn't exist or is banned (TikTok code ${j.statusCode})` };
+    if (p?.hasDetail && Number(p.statusCode) !== 0 && !p.id) {
+      return { missing: `@${handle} doesn't exist or is banned (TikTok code ${p.statusCode})` };
+    }
+    if (!this.lookupWarned) {
+      this.lookupWarned = true;
+      log.warn(`[${this.session.username}] Couldn't look up @${handle} cheaply (profile download: ${p?.status ?? 'no answer'}${p?.noData ? ', no data in page' : ''}${p?.error ? `, ${p.error}` : ''}).`);
     }
     return null;
   }
 
   async sendBlock(tpl, ids) {
-    const page = await this.ensureApiPage();
     const fill = (s) => String(s || '').split('{{uid}}').join(ids.userId).split('{{sec}}').join(ids.secUid);
-    const r = await pageXhr(page, { method: 'POST', url: fill(tpl.url), body: fill(tpl.body) || null, contentType: tpl.contentType });
-    return classifyTikTokReply(r.status, r.text);
+    const r = await this.api({ method: 'POST', url: fill(tpl.url), body: fill(tpl.body) || null, contentType: tpl.contentType, transport: tpl.transport || 'fetch' });
+    return { ...classifyTikTokReply(r.status, r.text), raw: `HTTP ${r.status} ${String(r.text || r.error || '').slice(0, 140)}` };
   }
 
-  /** Tries the usual TikTok block request so the first block doesn't need the profile page. */
+  saveTemplate(tpl) {
+    templates.data[this.me.uid] = { ...tpl, learnedAt: Date.now(), failures: 0 };
+    templates.save();
+    this.session.broadcast({ type: 'TEMPLATE', template: publicTemplate(templates.data[this.me.uid]) });
+  }
+
+  /** Tries the usual TikTok block request (both ways of sending) so no profile page is needed. */
   async probeGuesses(ids) {
     for (const g of DEFAULT_BLOCK_GUESSES) {
-      const r = await this.sendBlock(g, ids);
-      if (r.ok) {
-        templates.data[this.me.uid] = { ...g, learnedAt: Date.now(), failures: 0, source: 'guess' };
-        templates.save();
-        log.info(`[${this.session.username}] Fast block request works — no profile clicks needed.`);
-        return { ...r, vector: 'fast' };
+      for (const transport of [this.transport, this.transport === 'fetch' ? 'xhr' : 'fetch']) {
+        const r = await this.sendBlock({ ...g, transport }, ids);
+        if (r.ok) {
+          this.saveTemplate({ ...g, transport, source: 'guess' });
+          log.info(`[${this.session.username}] Direct block request works (${transport}) — no profile page needed.`);
+          return { ...r, vector: 'fast' };
+        }
+        if (r.code === 'rate_limited') return { ...r, vector: 'fast' };
+        log.info(`[${this.session.username}] Direct block attempt not accepted (${transport}): ${r.raw}`);
       }
-      if (r.code === 'rate_limited') return { ...r, vector: 'fast' };
-      log.info(`[${this.session.username}] Direct block request not accepted (${r.note}); using the profile page once to learn it.`);
     }
     return null;
   }
@@ -1004,6 +1134,11 @@ class TikTokAccount {
       const resp = await Promise.race([responseP, delay(CONFIG.block.uiAfterConfirmMs).then(() => null)]);
       if (!resp) {
         if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
+        // The block may have gone through even though we didn't see the request (TikTok can send it from a worker).
+        if (await waitForClick(page, { texts: UNBLOCK_WORDS, hoverOnly: true }, 4000)) {
+          log.warn(`[${this.session.username}] @${handle} blocked, but TikTok's block request wasn't visible, so fast mode couldn't be learned from it.`);
+          return { ok: true, ids };
+        }
         const sent = [...new Set(seen)].slice(0, 4);
         return {
           ok: false,
@@ -1014,8 +1149,7 @@ class TikTokAccount {
       }
       const verdict = classifyTikTokReply(resp.status(), await resp.text().catch(() => ''));
       if (verdict.ok && ids?.userId && ids?.secUid) {
-        templates.data[this.me.uid] = { ...learnTemplate(resp.request(), ids), source: 'profile' };
-        templates.save();
+        this.saveTemplate({ ...learnTemplate(resp.request(), ids), source: 'profile' });
         log.info(`[${this.session.username}] Learned TikTok's block request (${new URL(resp.url()).pathname}) — fast mode on.`);
         step('Learned it. Blocking the rest in fast mode…');
       }
@@ -1026,15 +1160,34 @@ class TikTokAccount {
   }
 
   async uiBlock(handle) {
-    const r = await this.withUiPage((page) => this.blockViaUi(page, handle));
-    return { ...r, vector: r.already ? 'already' : 'profile' };
+    let release = () => {};
+    if (CONFIG.lowMemory) {
+      // The single tab is about to leave its page: make API calls wait until it's done.
+      const prev = this.uiBusy;
+      const gate = new Promise((r) => (release = r));
+      this.uiBusy = gate;
+      if (prev) await prev.catch(() => {});
+      release = ((done) => () => {
+        done();
+        if (this.uiBusy === gate) this.uiBusy = null;
+      })(release);
+    }
+    try {
+      const r = await this.withUiPage((page) => this.blockViaUi(page, handle));
+      return { ...r, vector: r.already ? 'already' : 'profile' };
+    } finally {
+      release();
+    }
   }
+
 
   async block(handle) {
     lastBrowserUse = Date.now();
+    // Lookups run in parallel for every worker; they're cheap requests, not page loads.
+    const ids = await this.resolveIds(handle);
+    if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
+
     if (this.fastHealthy) {
-      const ids = await this.resolveIds(handle);
-      if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
       if (ids) {
         const r = await this.sendBlock(this.template, ids);
         if (r.ok || r.code === 'rate_limited') {
@@ -1043,19 +1196,20 @@ class TikTokAccount {
         }
         this.template.failures++;
         templates.save();
+        if (this.fastHealthy) return { ...r, vector: 'fast', ids };
+      } else if (this.lookupWorks) {
+        // Lookups work in general, so this one account is the problem (private, renamed, deleted…).
+        return { ok: false, code: 'lookup_failed', note: `Couldn't find @${handle}'s account ID`, vector: 'lookup' };
+      } else {
+        return this.uiBlock(handle); // lookups don't work here at all: the profile page is the only way
       }
-      if (this.fastHealthy) return this.uiBlock(handle);
     }
 
-    // The block request isn't known (or stopped working). One worker works it out through the
-    // profile page while the others wait, then they all go fast. Nothing else touches the tab meanwhile.
+    // The block request isn't known yet. One worker works it out while the rest wait, then all go fast.
     return this.learn(async () => {
       if ((this.session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop) {
         return { ok: false, code: 'stopped', note: this.session.uiStopNote || 'Stopped', vector: 'profile' };
       }
-      if (!this.fastHealthy) this.session.step(`Looking up @${handle}…`);
-      const ids = await this.resolveIds(handle);
-      if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
       if (ids && this.fastHealthy) {
         const r = await this.sendBlock(this.template, ids);
         if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
@@ -1069,6 +1223,7 @@ class TikTokAccount {
       return this.uiBlock(handle);
     });
   }
+
 
 }
 
@@ -1477,6 +1632,7 @@ function snapshot(s) {
     attempts: s.attempts.slice(-60),
     engine: { ...engineStatus },
     step: s.currentStep || '',
+    blockRequest: publicTemplate(s.lastUid && templates.data[s.lastUid]),
   };
 }
 
@@ -1526,7 +1682,14 @@ app.post(
     }
     try {
       await s.ensureAccount();
-      res.json({ success: true, auth: s.publicAuth() });
+      const saved = acceptSavedTemplate(req.body?.blockRequest);
+      const uid = s.account?.me?.uid;
+      if (saved && uid && !templates.data[uid]) {
+        templates.data[uid] = { ...saved, learnedAt: Date.now(), failures: 0 };
+        templates.save();
+        log.info(`[${s.username}] Restored the saved block request from the dashboard — fast mode on.`);
+      }
+      res.json({ success: true, auth: s.publicAuth(), blockRequest: publicTemplate(uid && templates.data[uid]) });
       ensureWorkers(s);
     } catch (e) {
       res.status(e.code === 'not_logged_in' ? 401 : 503).json({ error: e.message, code: e.code, auth: s.publicAuth() });
