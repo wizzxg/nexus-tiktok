@@ -8,17 +8,15 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-:root { --void: #05060b; --surface: #0a0d16; --surface-2: #0f1320; --surface-3: #161b2c; --surface-glass: rgba(12, 15, 26, 0.86); --line: rgba(148, 163, 196, 0.09); --line-2: rgba(148, 163, 196, 0.18); --text: #eef2f9; --muted: #8b95af; --faint: #555f78; --cyan: #2de2d0; --cyan-glow: rgba(45, 226, 208, 0.25); --cyan-soft: rgba(45, 226, 208, 0.10); --emerald: #10b981; --red: #ff4769; --red-soft: rgba(255, 71, 105, 0.11); --amber: #f59e0b; --violet: #a78bfa; --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --mono: 'JetBrains Mono', ui-monospace, monospace; --sans: 'Inter', system-ui, sans-serif; }
+:root { --void: #05060b; --surface: #0a0d16; --surface-2: #0f1320; --surface-3: #161b2c; --surface-glass: rgba(12, 15, 26, 0.86); --line: rgba(148, 163, 196, 0.09); --line-2: rgba(148, 163, 196, 0.18); --text: #eef2f9; --muted: #8b95af; --faint: #555f78; --cyan: #2de2d0; --cyan-glow: rgba(45, 226, 208, 0.25); --cyan-soft: rgba(45, 226, 208, 0.10); --emerald: #10b981; --red: #ff4769; --red-soft: rgba(255, 71, 105, 0.11); --amber: #f59e0b; --violet: #a78bfa; --r-xs: 4px; --r-md: 8px; --mono: 'JetBrains Mono', monospace; --sans: 'Inter', sans-serif; }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; background-color: var(--void); background-image: radial-gradient(1100px 520px at 50% -15%, rgba(45,226,208,0.08), transparent 65%), linear-gradient(180deg, #070912 0%, var(--void) 50%); background-attachment: fixed; overflow-x: hidden; }
 ::-webkit-scrollbar { width: 8px; height: 8px; } ::-webkit-scrollbar-track { background: var(--void); } ::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 4px; } ::-webkit-scrollbar-thumb:hover { background: #262f47; }
 :focus-visible { outline: 1.5px solid var(--cyan); outline-offset: 2px; }
-[hidden] { display: none !important; }
 
 .btn { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--line-2); padding: 8px 13px; border-radius: var(--r-xs); cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); }
 .btn:hover:not(:disabled) { color: var(--text); border-color: rgba(148,163,196,0.38); background: var(--surface-3); transform: translateY(-1px); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-primary { color: var(--cyan); border-color: rgba(45,226,208,0.32); background: linear-gradient(180deg, rgba(45,226,208,0.14), rgba(45,226,208,0.05)); }
 .btn-primary:hover:not(:disabled) { color: #031412; background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 20px -4px var(--cyan-glow); }
 .btn-danger { color: #ff6b86; border-color: rgba(255,71,105,0.28); background: linear-gradient(180deg, rgba(255,71,105,0.12), rgba(255,71,105,0.04)); }
@@ -26,10 +24,6 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .btn-violet { color: var(--violet); border-color: rgba(167,139,250,0.28); background: linear-gradient(180deg, rgba(167,139,250,0.12), rgba(167,139,250,0.04)); }
 .btn-violet:hover:not(:disabled) { color: #0f0722; background: var(--violet); border-color: var(--violet); box-shadow: 0 0 20px -4px rgba(167,139,250,0.45); }
 .btn-warn { color: var(--amber); border-color: rgba(245,158,11,0.28); background: linear-gradient(180deg, rgba(245,158,11,0.12), rgba(245,158,11,0.04)); }
-.btn-warn:hover:not(:disabled) { color: #1a0f00; background: var(--amber); border-color: var(--amber); }
-.btn.is-busy { pointer-events: none; opacity: 0.7; }
-.btn.is-busy::before { content: ""; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
 
 #login-section { position: relative; z-index: 1; margin: 14vh auto 0; width: 92%; max-width: 430px; background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--line-2); border-top: 2px solid var(--cyan); border-radius: var(--r-md); padding: 36px 32px 32px; box-shadow: 0 32px 80px -24px rgba(0,0,0,0.95), 0 0 40px -15px rgba(45,226,208,0.12); }
 .login-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
@@ -39,10 +33,10 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 #login-section h2 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
 #login-section .sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
 .field-label { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 8px; }
-.login-input, .modal-input { width: 100%; padding: 12px 14px; background: var(--void); color: var(--cyan); border: 1px solid var(--line-2); border-radius: var(--r-xs); outline: none; font-family: var(--mono); font-size: 12.5px; transition: 0.15s; margin-bottom: 16px; }
-.login-input:focus, .modal-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
+.login-input { width: 100%; padding: 12px 14px; background: var(--void); color: var(--cyan); border: 1px solid var(--line-2); border-radius: var(--r-xs); outline: none; font-family: var(--mono); font-size: 12.5px; transition: 0.15s; margin-bottom: 16px; }
+.login-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
 
-#dashboard-section { position: relative; z-index: 1; width: 100%; max-width: 1480px; margin: 0 auto; padding: 0 24px 90px; }
+#dashboard-section { position: relative; z-index: 1; width: 100%; max-width: 1480px; margin: 0 auto; padding: 0 24px 70px; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 20px 2px 14px; flex-wrap: wrap; gap: 14px; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-badge { width: 28px; height: 28px; border-radius: var(--r-xs); background: var(--cyan-soft); border: 1px solid rgba(45,226,208,0.35); display: flex; align-items: center; justify-content: center; color: var(--cyan); font-size: 14px; box-shadow: 0 0 16px -4px var(--cyan-glow); }
@@ -51,18 +45,15 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .telemetry-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .status-pill { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--line-2); padding: 6px 12px; border-radius: var(--r-xs); font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); cursor: pointer; transition: 0.15s; }
 .status-pill:hover { border-color: var(--cyan); color: var(--text); }
-.status-pill.fast { color: var(--cyan); border-color: rgba(45,226,208,0.32); cursor: default; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: pulse 2.4s infinite; }
 .status-dot.offline { background: var(--faint); box-shadow: none; animation: none; }
 .status-dot.live { background: var(--emerald); box-shadow: 0 0 8px var(--emerald); }
-.status-dot.error { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: none; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(45,226,208,0.5); } 70% { box-shadow: 0 0 0 6px rgba(45,226,208,0); } 100% { box-shadow: 0 0 0 0 rgba(45,226,208,0); } }
 
 .sticky-header { position: sticky; top: 0; z-index: 100; padding: 8px 0 14px; background: linear-gradient(180deg, var(--void) 65%, transparent); }
-.deck { background: var(--surface-glass); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border: 1px solid var(--line-2); border-radius: var(--r-md); box-shadow: 0 20px 50px -20px rgba(0,0,0,0.85); overflow: hidden; }
+.deck { background: var(--surface-glass); backdrop-filter: blur(18px); border: 1px solid var(--line-2); border-radius: var(--r-md); box-shadow: 0 20px 50px -20px rgba(0,0,0,0.85); overflow: hidden; }
 .deck-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; flex-wrap: wrap; }
 .deck-row + .deck-row { border-top: 1px solid var(--line); background: rgba(7,9,16,0.45); }
-.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .view-tabs { display: inline-flex; background: var(--void); border: 1px solid var(--line-2); border-radius: 6px; padding: 3px; gap: 3px; flex: none; }
 .vtab { font-family: var(--mono); font-size: 10.5px; font-weight: 600; text-transform: uppercase; color: var(--cyan); background: var(--cyan-soft); border: 1px solid rgba(45,226,208,0.3); box-shadow: 0 0 14px -4px var(--cyan-glow); border-radius: var(--r-xs); padding: 7px 13px; display: inline-flex; align-items: center; gap: 7px; }
@@ -70,226 +61,158 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 
 .search-wrap { position: relative; flex: 1; min-width: 200px; }
 .search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
-.text-in { padding: 9px 13px; background: var(--void); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--r-xs); font-family: var(--mono); font-size: 12px; transition: 0.15s; outline: none; }
-.text-in:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
-#search-input { width: 100%; padding-left: 36px; font-family: var(--sans); font-size: 13px; }
-#tt-username-input { width: 210px; }
-#tt-quick-block-input { width: 180px; }
-select.text-in { padding: 6px 8px; font-size: 11px; cursor: pointer; }
+#search-input, #tt-username-input, #tt-quick-block-input { padding: 9px 13px 9px 36px; background: var(--void); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--r-xs); font-family: var(--sans); font-size: 13px; transition: 0.15s; width: 100%; outline: none; }
+#tt-username-input, #tt-quick-block-input { padding-left: 12px; font-family: var(--mono); font-size: 12px; width: 220px; flex: none; }
+#tt-quick-block-input { width: 195px; }
+#search-input:focus, #tt-username-input:focus, #tt-quick-block-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
 
-.toggle { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; color: var(--muted); padding: 4px 8px; transition: 0.15s; position: relative; }
-.toggle:hover { color: var(--text); }
+.toggle { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; color: var(--muted); padding: 4px 8px; transition: 0.15s; }
 .toggle input { position: absolute; opacity: 0; }
-.track { width: 34px; height: 18px; border-radius: 10px; background: var(--void); border: 1px solid var(--line-2); position: relative; transition: 0.18s; flex: none; }
+.track { width: 34px; height: 18px; border-radius: 10px; background: var(--void); border: 1px solid var(--line-2); position: relative; transition: 0.18s; }
 .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--faint); transition: 0.18s; }
 .toggle input:checked + .track { background: var(--cyan-soft); border-color: var(--cyan); }
 .toggle input:checked + .track::after { transform: translateX(16px); background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
-.toggle.red input:checked + .track { background: var(--red-soft); border-color: var(--red); }
-.toggle.red input:checked + .track::after { background: var(--red); box-shadow: 0 0 6px var(--red); }
-.toggle input:focus-visible + .track { outline: 1.5px solid var(--cyan); outline-offset: 2px; }
 
+.deck-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .divider { width: 1px; height: 20px; background: var(--line-2); margin: 0 4px; }
-.auto-status { display: flex; align-items: center; gap: 8px; margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--faint); background: var(--void); border: 1px solid var(--line); padding: 5px 11px; border-radius: var(--r-xs); max-width: 340px; }
-.auto-status span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.auto-status { display: flex; align-items: center; gap: 8px; margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--faint); background: var(--void); border: 1px solid var(--line); padding: 5px 11px; border-radius: var(--r-xs); }
 .auto-status.is-live { color: var(--cyan); border-color: rgba(45,226,208,0.28); }
-.auto-status.is-error { color: var(--amber); border-color: rgba(245,158,11,0.28); }
 .auto-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
 .auto-status.is-live .auto-dot { background: var(--cyan); animation: pulse 2.4s infinite; }
-.auto-status.is-error .auto-dot { background: var(--amber); }
 
 #tt-metrics-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px; margin-top: 12px; }
 .metric-tile { background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--line-2); border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; }
 .metric-tile .m-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
-.metric-tile .m-val { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--cyan); font-variant-numeric: tabular-nums; }
-.m-val.emerald { color: var(--emerald); } .m-val.violet { color: var(--violet); } .m-val.red { color: #ff6b86; }
+.metric-tile .m-val { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--cyan); }
 
 #requests-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
 #requests-container.compact-mode { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
-.user-card { background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%); border: 1px solid var(--line-2); border-radius: 6px; padding: 26px 16px 16px; display: flex; flex-direction: column; align-items: center; text-align: center; transition: border-color .15s, transform .15s, box-shadow .15s; position: relative; }
+.user-card { background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%); border: 1px solid var(--line-2); border-radius: 6px; padding: 22px 16px 16px; display: flex; flex-direction: column; align-items: center; text-align: center; transition: 0.15s; position: relative; }
 #requests-container.compact-mode .user-card { flex-direction: row; text-align: left; padding: 12px 14px; gap: 12px; }
 .user-card:hover { border-color: rgba(45,226,208,0.38); transform: translateY(-2px); box-shadow: 0 10px 20px -10px rgba(0,0,0,0.8); }
-.user-card.hot { border-color: rgba(255,71,105,0.35); }
-.user-card.fresh { animation: fresh 1.4s ease-out; }
-.user-card.listed { opacity: 0.45; }
-@keyframes fresh { from { box-shadow: 0 0 0 1px var(--cyan), 0 0 26px -6px var(--cyan-glow); } to { box-shadow: none; } }
 
 .tt-share-pill { font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--cyan); background: var(--cyan-soft); border: 1px solid rgba(45,226,208,0.32); padding: 2px 7px; border-radius: 3px; position: absolute; top: 10px; right: 10px; }
-.hot .tt-share-pill { color: #ff6b86; background: var(--red-soft); border-color: rgba(255,71,105,0.35); }
 .tt-time-pill { font-family: var(--mono); font-size: 9px; color: var(--faint); position: absolute; top: 12px; left: 11px; }
-#requests-container.compact-mode .tt-time-pill { display: none; }
-#requests-container.compact-mode .tt-share-pill { position: static; flex: none; order: 3; }
 .pfp-wrap { width: 74px; height: 74px; margin-bottom: 12px; flex: none; }
 #requests-container.compact-mode .pfp-wrap { width: 46px; height: 46px; margin-bottom: 0; }
-.pfp { width: 100%; height: 100%; border-radius: 10px; background: var(--void); border: 1px solid var(--line-2); padding: 2px; object-fit: cover; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 700; font-size: 22px; color: var(--cyan); }
-#requests-container.compact-mode .pfp { font-size: 15px; }
+.pfp { width: 100%; height: 100%; border-radius: 10px; background: var(--void); border: 1px solid var(--line-2); padding: 2px; object-fit: cover; }
 .names { width: 100%; margin-bottom: 14px; overflow: hidden; }
-#requests-container.compact-mode .names { margin-bottom: 0; flex: 1; min-width: 0; }
+#requests-container.compact-mode .names { margin-bottom: 0; flex: 1; }
 .names h2 { margin: 0; font-size: 14.5px; font-weight: 600; color: var(--text); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
-.names p { margin: 4px 0 0; font-family: var(--mono); font-size: 11px; color: var(--muted); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
-.names p button { all: unset; cursor: pointer; }
-.names p button:hover { color: var(--cyan); }
+.names p { margin: 4px 0 0; font-family: var(--mono); font-size: 11px; color: var(--muted); cursor: pointer; }
 .actions { display: flex; gap: 8px; width: 100%; }
-#requests-container.compact-mode .actions { width: auto; flex: none; order: 4; }
+#requests-container.compact-mode .actions { width: auto; flex: none; }
 .actions .btn { flex: 1; padding: 8px 10px; font-size: 10px; }
-.listed-tag { flex: 1; font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--violet); padding: 8px 0; }
 
 #empty-state { display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 84px 20px; margin-top: 18px; border: 1px dashed var(--line-2); border-radius: var(--r-md); color: var(--muted); }
-#empty-state .es-glyph { font-size: 28px; color: var(--faint); margin-bottom: 10px; }
 #empty-state h3 { margin: 0 0 6px; font-family: var(--mono); font-size: 13.5px; color: var(--text); }
-#empty-state p { margin: 0; max-width: 46ch; }
 
 .modal { display: none; position: fixed; inset: 0; z-index: 1000; background: rgba(3,4,8,0.84); backdrop-filter: blur(8px); justify-content: center; align-items: center; padding: 20px; }
-.modal.open { display: flex; }
-.modal-content { width: 100%; max-width: 580px; max-height: calc(100vh - 40px); overflow-y: auto; background: var(--surface-2); border: 1px solid var(--line-2); border-top: 2px solid var(--cyan); border-radius: var(--r-md); padding: 24px 26px; }
+.modal-content { width: 100%; max-width: 580px; background: var(--surface-2); border: 1px solid var(--line-2); border-top: 2px solid var(--cyan); border-radius: var(--r-md); padding: 24px 26px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .modal-head h2 { margin: 0; font-size: 16px; font-family: var(--mono); }
 .modal-close { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; }
-.modal-close:hover { color: var(--text); }
-.modal-note { font-size: 12px; color: var(--muted); margin: 0 0 16px; }
-textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: var(--cyan); border: 1px solid var(--line-2); border-radius: var(--r-xs); padding: 13px; font-family: var(--mono); font-size: 12px; margin-bottom: 8px; resize: vertical; outline: none; }
+textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: var(--cyan); border: 1px solid var(--line-2); border-radius: var(--r-xs); padding: 13px; font-family: var(--mono); font-size: 12px; margin-bottom: 16px; resize: vertical; outline: none; }
 .modal-ta:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
-.ta-count { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-bottom: 14px; }
 .modal-actions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-.steps { margin: 0 0 16px; padding-left: 18px; font-size: 12.5px; color: var(--muted); }
-.steps li { margin-bottom: 3px; }
-.steps code { font-family: var(--mono); color: var(--cyan); background: var(--void); padding: 1px 5px; border-radius: 3px; }
-.acct-box { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line-2); border-radius: var(--r-xs); background: var(--void); margin-bottom: 16px; }
-.acct-box .pfp { width: 40px; height: 40px; font-size: 15px; }
-.acct-box b { display: block; font-family: var(--mono); font-size: 12.5px; }
-.acct-box span { font-size: 12px; color: var(--muted); }
-.form-msg { font-size: 12.5px; padding: 10px 12px; border-radius: var(--r-xs); margin: -4px 0 16px; border: 1px solid; }
-.form-msg.err { color: var(--amber); border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.06); }
-.form-msg.info { color: var(--cyan); border-color: rgba(45,226,208,0.3); background: var(--cyan-soft); }
 
-.diag-wrap { overflow-y: auto; max-height: 380px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--void); margin-bottom: 16px; }
-.diag-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
-.diag-table th { position: sticky; top: 0; background: var(--surface-2); color: var(--muted); padding: 8px; text-align: left; font-weight: 600; }
-.diag-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-.diag-table td.u { color: var(--cyan); }
-.diag-table td.ok { color: var(--emerald); }
-.diag-table td.bad { color: #ff6b86; }
-.diag-table td.dim { color: var(--faint); }
-
-#toast-container { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 1100; max-width: min(370px, calc(100vw - 44px)); }
+#toast-container { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 1100; max-width: 370px; }
 .toast { display: flex; align-items: flex-start; gap: 11px; background: rgba(15,19,32,0.96); backdrop-filter: blur(10px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: var(--r-xs); padding: 12px 15px; font-size: 12.5px; animation: slideIn 0.25s both; transition: 0.25s; }
-.toast.error { border-left-color: var(--red); } .toast.warn { border-left-color: var(--amber); } .toast.success { border-left-color: var(--emerald); }
-.toast-glyph { font-family: var(--mono); font-weight: 700; color: var(--cyan); }
-.toast.error .toast-glyph { color: var(--red); } .toast.warn .toast-glyph { color: var(--amber); } .toast.success .toast-glyph { color: var(--emerald); }
+.toast.error { border-left-color: var(--red); }
 @keyframes slideIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
-#job-progress { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(560px, calc(100vw - 32px)); background: rgba(15,19,32,0.96); backdrop-filter: blur(14px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: var(--r-sm); padding: 15px 18px; z-index: 1200; box-shadow: 0 20px 50px -20px #000; }
-#job-progress.done { border-left-color: var(--emerald); }
-.jp-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; }
-.jp-head span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#job-progress { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); background: rgba(15,19,32,0.96); backdrop-filter: blur(14px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 15px 18px; z-index: 1200; }
+.jp-head { display: flex; justify-content: space-between; margin-bottom: 10px; font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; }
 .jp-track { height: 5px; background: var(--void); border-radius: 3px; overflow: hidden; }
-.jp-fill { height: 100%; width: 0%; background: var(--cyan); box-shadow: 0 0 10px var(--cyan-glow); transition: width 0.2s linear; }
-#job-progress.done .jp-fill { background: var(--emerald); }
-.jp-stats { display: flex; gap: 14px; margin-top: 10px; font-family: var(--mono); font-size: 10.5px; flex-wrap: wrap; }
-.jp-stats .ok { color: var(--emerald); } .jp-stats .skip { color: var(--violet); } .jp-stats .bad { color: #ff6b86; } .jp-stats .rate { color: var(--muted); margin-left: auto; }
-.jp-meta { margin-top: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); word-break: break-word; }
-
-@media (max-width: 760px) {
-  #dashboard-section { padding: 0 12px 90px; }
-  .sticky-header { position: static; }
-  .divider { display: none; }
-  #tt-username-input, #tt-quick-block-input { width: auto; flex: 1; min-width: 140px; }
-  .auto-status { margin-left: 0; width: 100%; max-width: none; }
-  #tt-metrics-bar { grid-template-columns: 1fr 1fr; }
-  .metric-tile { flex-direction: column; align-items: flex-start; gap: 2px; }
-  #requests-container { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
-  #requests-container.compact-mode { grid-template-columns: 1fr; }
-}
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+.jp-fill { height: 100%; width: 0%; background: var(--cyan); transition: width 0.2s linear; }
+.jp-meta { margin-top: 9px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 </style>
 </head>
 <body>
 
-<div id="login-section" hidden>
+<div id="login-section">
   <div class="login-mark"><span class="glyph">◈</span><b>NEXUS</b><span>// TIKTOK ENGINE</span></div>
   <h2>Authenticate Session</h2>
-  <p class="sub">Enter your username and a session ID. The blacklist is shared by everyone on this server; your listener and TikTok account stay private to your session.</p>
-  <form id="login-form">
-    <label class="field-label" for="username-input">Username</label>
-    <input type="text" id="username-input" class="login-input" placeholder="e.g., Wizz" autocomplete="nickname">
-    <label class="field-label" for="session-input">Session ID</label>
-    <input type="text" id="session-input" class="login-input" placeholder="Something only you would guess" style="margin-bottom:0;" autocomplete="off">
-    <button class="btn btn-primary" type="submit" style="width:100%; margin-top:18px; font-size:12px; padding:12px;">Access Terminal</button>
-  </form>
+  <p class="sub">Enter your Username and Session ID. The username blacklist is synced globally, while your listener is private.</p>
+  
+  <label class="field-label">Username</label>
+  <input type="text" id="username-input" class="login-input" placeholder="e.g., Wizz">
+
+  <label class="field-label">Session ID</label>
+  <input type="text" id="session-input" class="login-input" placeholder="e.g., Session-1" style="margin-bottom:0;" onkeydown="if(event.key==='Enter')saveSession()">
+  
+  <button class="btn btn-primary" style="width:100%; margin-top:18px; font-size:12px; padding:12px;" onclick="saveSession()">Access Terminal</button>
 </div>
 
-<div id="dashboard-section" hidden>
+<div id="dashboard-section" style="display:none;">
   <div class="topbar">
-    <div class="brand"><div class="brand-badge">◈</div><b>NEXUS</b><span>// TIKTOK TERMINAL</span></div>
+    <div class="brand">
+      <div class="brand-badge">◈</div>
+      <b>NEXUS</b>
+      <span>// TIKTOK TERMINAL</span>
+    </div>
     <div class="telemetry-bar">
-      <div class="status-pill fast" id="fast-pill" hidden title="Blocks are sent straight to TikTok in parallel">⚡ Fast mode</div>
-      <div class="status-pill" onclick="openDiagnostics()" title="Open block diagnostics">
+      <div class="status-pill" onclick="openTikTokDiagnosticsModal()">
         <span class="status-dot offline" id="top-tt-dot"></span>
         <span id="top-tt-text">TikTok: Standby</span>
       </div>
-      <div class="status-pill" onclick="logoutSession()"><span>Disconnect Session</span></div>
+      <div class="status-pill" onclick="logoutSession()">
+        <span>Disconnect Session</span>
+      </div>
     </div>
   </div>
 
   <div class="sticky-header">
     <div class="deck">
       <div class="deck-row">
-        <div class="view-tabs"><span class="vtab">TikTok Live <span class="vtab-count" id="tt-tab-count">0</span></span></div>
+        <div class="view-tabs">
+          <button class="vtab is-active">TikTok Live <span class="vtab-count" id="tt-tab-count">0</span></button>
+        </div>
+
         <div class="search-wrap">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-          <input type="text" id="search-input" class="text-in" placeholder="Filter queue by @username…" autocomplete="off">
+          <input type="text" id="search-input" placeholder="Filter queue by @username…" oninput="handleFilterChange()">
         </div>
-        <label class="toggle" title="Also show sharers who are already on the blacklist">
-          <input type="checkbox" id="show-listed-toggle"><span class="track"></span> Show blocked
-        </label>
-        <label class="toggle" title="Compact rows">
-          <input type="checkbox" id="compact-view-toggle"><span class="track"></span> Compact
+        
+        <label class="toggle" title="Toggle Compact Tactical Rows">
+          <input type="checkbox" id="compact-view-toggle" onchange="toggleCompactMode()">
+          <span class="track"></span> Compact
         </label>
       </div>
 
-      <div class="deck-row">
-        <form class="group" id="live-form">
-          <input type="text" id="tt-username-input" class="text-in" placeholder="@tiktok_streamer (LIVE)…" autocomplete="off">
-          <button class="btn btn-primary" type="submit" id="btn-tt-connect">● Listen Live</button>
-          <button class="btn btn-danger" type="button" id="btn-tt-disconnect">Stop</button>
-        </form>
-
+      <div class="deck-row deck-actions">
+        <input type="text" id="tt-username-input" placeholder="@tiktok_streamer (LIVE)..." onkeydown="if(event.key==='Enter')connectTikTokLive()">
+        <button class="btn btn-primary" onclick="connectTikTokLive()" id="btn-tt-connect">● Listen Live</button>
+        <button class="btn btn-danger" onclick="disconnectTikTokLive()" id="btn-tt-disconnect">Stop</button>
+        
         <span class="divider"></span>
-        <div class="group">
-          <label class="toggle red" title="Automatically block people who share this many times">
-            <input type="checkbox" id="tt-autoblock-toggle"><span class="track"></span> Auto-Block
-          </label>
-          <select class="text-in" id="tt-threshold" title="Shares before auto-block">
-            <option value="1">1x+</option><option value="2" selected>2x+</option><option value="3">3x+</option><option value="5">5x+</option>
-          </select>
-          <button class="btn btn-danger" id="btn-block-all">Fast-Block All</button>
-          <button class="btn btn-violet" onclick="openBlacklist()">Blacklist (<span id="tt-bl-count">0</span>)</button>
-          <button class="btn" onclick="openAccount()" id="btn-tt-login">TikTok Account</button>
-        </div>
-
+        <label class="toggle" title="Auto-block users who share 2x or more">
+          <input type="checkbox" id="tt-autoblock-toggle" onchange="toggleTikTokAutoBlock()">
+          <span class="track"></span> Auto-Block (2x+)
+        </label>
+        <button class="btn btn-danger" onclick="blockAllTikTokSharers()">Fast-Block All</button>
+        <button class="btn btn-violet" onclick="openTikTokBlacklistModal()">Blacklist (<span id="tt-bl-count">0</span>)</button>
+        <button class="btn" onclick="openTikTokLoginModal()" id="btn-tt-login">TikTok Account</button>
+        
         <span class="divider"></span>
-        <form class="group" id="quick-form">
-          <input type="text" id="tt-quick-block-input" class="text-in" placeholder="Quick block @user…" autocomplete="off">
-          <button class="btn btn-danger" type="submit">Block @</button>
-        </form>
-
+        <input type="text" id="tt-quick-block-input" placeholder="Quick block @user..." onkeydown="if(event.key==='Enter')quickBlockTikTokInput()">
+        <button class="btn btn-danger" onclick="quickBlockTikTokInput()">Block @</button>
+        
         <span class="divider"></span>
-        <div class="group">
-          <button class="btn" id="btn-copy">Copy @Users</button>
-          <button class="btn btn-warn" id="btn-clear">Clear Log</button>
-        </div>
+        <button class="btn" onclick="copyAllTikTokSharers()">Copy @Users</button>
+        <button class="btn btn-warn" onclick="clearTikTokSharers()">Clear Log</button>
 
-        <div class="auto-status" id="tt-live-status">
-          <span class="auto-dot"></span>
+        <div class="auto-status" id="tt-live-status" style="margin-left:auto;">
+          <span class="auto-dot" id="tt-live-dot"></span>
           <span id="tt-live-status-text">Listener offline</span>
         </div>
       </div>
     </div>
 
     <div id="tt-metrics-bar">
-      <div class="metric-tile"><span class="m-label">Active Sharers</span><span class="m-val" id="m-active">0</span></div>
-      <div class="metric-tile"><span class="m-label">Total Share Events</span><span class="m-val emerald" id="m-shares">0</span></div>
-      <div class="metric-tile"><span class="m-label">Blocked This Session</span><span class="m-val red" id="m-blocked">0</span></div>
-      <div class="metric-tile"><span class="m-label">Global Blacklisted</span><span class="m-val violet" id="m-blacklisted">0</span></div>
+      <div class="metric-tile"><span class="m-label">Active Sharers</span><span class="m-val" id="tt-metric-visible">0</span></div>
+      <div class="metric-tile"><span class="m-label">Total Share Events</span><span class="m-val emerald" id="tt-metric-total-shares">0</span></div>
+      <div class="metric-tile"><span class="m-label">Global Blacklisted</span><span class="m-val violet" id="tt-metric-blacklisted">0</span></div>
     </div>
   </div>
 
@@ -298,546 +221,669 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
   <div id="empty-state">
     <div class="es-glyph">◇</div>
     <h3 id="empty-title">No live shares collected yet</h3>
-    <p id="empty-body">Enter a TikTok @username above and click Listen Live. Everyone who shares the LIVE shows up here.</p>
+    <p id="empty-body">Enter your TikTok @username above and click Listen Live.</p>
   </div>
 </div>
 
-<!-- BLACKLIST MODAL -->
-<div id="bl-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="bl-title">
+<!-- TIKTOK BLACKLIST MODAL -->
+<div id="tt-blacklist-modal" class="modal">
   <div class="modal-content">
-    <div class="modal-head"><h2 id="bl-title">TikTok Username Blacklist</h2><button class="modal-close" data-close aria-label="Close">✕</button></div>
-    <p class="modal-note">One username per line. @ signs and profile links are fine. This list is shared by every session on the server.</p>
-    <textarea id="bl-textarea" class="modal-ta" spellcheck="false" placeholder="username&#10;username2"></textarea>
-    <div class="ta-count" id="bl-ta-count">0 valid usernames</div>
+    <div class="modal-head">
+      <h2>TikTok Username Blacklist</h2>
+      <button class="modal-close" onclick="closeTikTokBlacklistModal()">✕</button>
+    </div>
+    <p style="font-size:12px; color:var(--muted); margin-top:0;">One username per line (without @). This blacklist is synced globally across all users.</p>
+    <textarea id="tt-blacklist-textarea" class="modal-ta" placeholder="username&#10;username1"></textarea>
     <div class="modal-actions">
-      <button class="btn btn-danger" id="btn-block-listed">⚡ Fast-Block All Listed</button>
       <div style="display:flex; gap:8px;">
-        <button class="btn" data-close>Close</button>
-        <button class="btn btn-primary" id="btn-save-list">Save Blacklist</button>
+        <button class="btn btn-danger" onclick="blockAllListedTikTokUsers()">⚡ Fast-Block All Listed</button>
+        <button class="btn btn-warn" onclick="clearGlobalBlacklist()">Clear All</button>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" onclick="closeTikTokBlacklistModal()">Close</button>
+        <button class="btn btn-primary" onclick="saveTikTokBlacklistText()">Save Blacklist</button>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ACCOUNT MODAL -->
-<div id="acct-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="acct-title">
+<!-- TIKTOK LOGIN MODAL -->
+<div id="tt-login-modal" class="modal">
   <div class="modal-content">
-    <div class="modal-head"><h2 id="acct-title">TikTok Account Session</h2><button class="modal-close" data-close aria-label="Close">✕</button></div>
-    <p class="modal-note">NEXUS blocks people from this account. The cookie is kept on your server and in this browser only.</p>
-    <div class="acct-box" id="acct-box" hidden>
-      <div class="pfp" id="acct-pfp">?</div>
-      <div><b id="acct-name"></b><span id="acct-sub"></span></div>
+    <div class="modal-head">
+      <h2>TikTok Account Session</h2>
+      <button class="modal-close" onclick="closeTikTokLoginModal()">✕</button>
     </div>
-    <ol class="steps">
-      <li>Open tiktok.com in Opera GX (or any browser) and make sure you're logged in.</li>
-      <li>Press Ctrl+Shift+I, open the <b>Network</b> tab, then press F5 to reload the page.</li>
-      <li>Click the top row whose Type is <code>document</code>, scroll to <b>Request Headers</b>, right-click the <code>cookie</code> line and choose Copy value.</li>
-      <li>Paste it below. Copying only <code>sessionid</code> sometimes isn't enough.</li>
-    </ol>
-    <label class="field-label" for="tt-cookie-input">Cookie string</label>
-    <input type="password" id="tt-cookie-input" class="modal-input" placeholder="Paste the whole cookie string…" autocomplete="off">
-    <div class="form-msg info" id="acct-engine" hidden></div>
-    <div class="form-msg err" id="acct-err" hidden></div>
+    <p style="font-size:12px; color:var(--muted); margin-top:0;">Connect your TikTok session cookie so NEXUS can auto-block users.</p>
+    <input type="text" id="tt-account-name-input" placeholder="@your_handle" style="width:100%; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:12px; margin-bottom:14px; outline:none;">
+    <input type="password" id="tt-cookie-input" placeholder="Paste full Cookie header or sessionid..." style="width:100%; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--cyan); font-family:var(--mono); font-size:12px; margin-bottom:14px; outline:none;">
     <div class="modal-actions">
-      <button class="btn btn-danger" id="btn-acct-logout">Disconnect Account</button>
+      <button class="btn btn-danger" onclick="logoutTikTokAccount()">Disconnect Account</button>
       <div style="display:flex; gap:8px;">
-        <button class="btn" data-close>Cancel</button>
-        <button class="btn btn-primary" id="btn-acct-save">Save &amp; Connect</button>
+        <button class="btn" onclick="closeTikTokLoginModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTikTokLogin()">Save &amp; Connect</button>
       </div>
     </div>
   </div>
 </div>
 
-<!-- DIAGNOSTICS MODAL -->
-<div id="diag-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="diag-title">
-  <div class="modal-content" style="max-width: 820px;">
-    <div class="modal-head"><h2 id="diag-title">TikTok Diagnostics</h2><button class="modal-close" data-close aria-label="Close">✕</button></div>
-    <p class="modal-note" id="diag-summary"></p>
-    <div class="diag-wrap">
-      <table class="diag-table">
-        <thead><tr><th>Time</th><th>User</th><th>ID</th><th>Method</th><th>ms</th><th>Result</th></tr></thead>
-        <tbody id="diag-tbody"></tbody>
+<!-- TIKTOK DIAGNOSTICS MODAL -->
+<div id="tt-diag-modal" class="modal">
+  <div class="modal-content" style="max-width: 760px;">
+    <div class="modal-head">
+      <h2>TikTok Diagnostics</h2>
+      <button class="modal-close" onclick="closeTikTokDiagnosticsModal()">✕</button>
+    </div>
+    <p id="tt-diag-summary" style="font-size:12px; color:var(--muted); margin-top:0;"></p>
+    <div style="overflow-y:auto; max-height:360px; border:1px solid var(--line-2); border-radius:6px; background:var(--void); margin-bottom:16px;">
+      <table style="width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11px;" id="tt-diag-table">
+        <thead style="background:var(--surface-2); color:var(--muted); position:sticky; top:0;">
+          <tr><th style="padding:8px; text-align:left;">Time</th><th style="padding:8px; text-align:left;">User</th><th style="padding:8px; text-align:left;">ID</th><th style="padding:8px; text-align:left;">Vector</th><th style="padding:8px; text-align:left;">Result</th></tr>
+        </thead>
+        <tbody id="tt-diag-tbody"></tbody>
       </table>
     </div>
     <div class="modal-actions">
-      <span class="modal-note" style="margin:0">Updates live.</span>
-      <button class="btn btn-primary" data-close>Close</button>
+      <button class="btn" onclick="refreshTikTokDiagnostics()">↻ Refresh</button>
+      <button class="btn btn-primary" onclick="closeTikTokDiagnosticsModal()">Close</button>
     </div>
   </div>
 </div>
 
-<div id="toast-container" aria-live="polite"></div>
+<div id="toast-container"></div>
 
 <script>
-'use strict';
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const norm = (s) => String(s || '').trim().replace(/^.*tiktok\.com\/@/i, '').replace(/^@+/, '').replace(/[/?#].*$/, '').toLowerCase();
-const validHandle = (h) => /^[a-z0-9._]{2,24}$/.test(h);
-const store = {
-  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
-  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
-  del: (k) => { try { localStorage.removeItem(k); } catch {} },
+const BACKEND_URL = window.location.origin;
+
+let USERNAME = localStorage.getItem('nexusUsername');
+let SESSION_ID = localStorage.getItem('nexusSessionId');
+
+const apiFetch = async (endpoint, options = {}) => {
+  const url = endpoint.startsWith('http') ? endpoint : `${BACKEND_URL}${endpoint}`;
+  options.headers = { ...options.headers, 'x-session-id': SESSION_ID, 'x-username': USERNAME };
+  return fetch(url, options);
 };
 
-let USERNAME = store.get('nexusUsername');
-let SESSION_ID = store.get('nexusSessionId');
+const loginSection = document.getElementById('login-section');
+const dashboardSection = document.getElementById('dashboard-section');
+const container = document.getElementById('requests-container');
+const searchInput = document.getElementById('search-input');
+const compactViewToggle = document.getElementById('compact-view-toggle');
+const ttBlacklistModal = document.getElementById('tt-blacklist-modal');
+const ttBlacklistTa = document.getElementById('tt-blacklist-textarea');
+const ttLoginModal = document.getElementById('tt-login-modal');
+const ttDiagModal = document.getElementById('tt-diag-modal');
+const emptyState = document.getElementById('empty-state');
 
-const S = {
-  sharers: new Map(), blacklist: new Set(), live: { connected: false }, auth: { loggedIn: false },
-  job: null, attempts: [], fresh: new Set(), visible: [], jobStartedAt: 0, engine: { state: 'idle' },
-};
-let es = null;
+let visibleIds = [];
+let searchDebounce = null;
+let renderQueued = false;
 
-function api(path, opts = {}) {
-  const headers = { 'x-session-id': SESSION_ID, 'x-username': USERNAME, ...(opts.body ? { 'Content-Type': 'application/json' } : {}) };
-  return fetch(path, { ...opts, headers, body: opts.body ? JSON.stringify(opts.body) : undefined })
-    .then(async (r) => ({ ok: r.ok, status: r.status, data: await r.json().catch(() => ({})) }));
+let ttSharersMap = new Map();
+let ttBlacklistSet = new Set();
+let ttEventSource = null;
+let ttState = { connected: false, username: null, error: null };
+let ttAuth = { loggedIn: false, accountName: '', autoBlockSharers: false };
+let activeTikTokJobId = null;
+
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function parseCleanUsernames(raw) {
+  const arr = Array.isArray(raw) ? raw : [String(raw ? raw : '')];
+  const out = [];
+  const seen = new Set();
+  for (const item of arr) {
+    const parts = String(item ? item : '').split(/[\r\n,;\s]+/);
+    for (const part of parts) {
+      const clean = part.trim().replace(/^@+/, '').toLowerCase();
+      if (clean.length >= 2 && !seen.has(clean)) {
+        seen.add(clean);
+        out.push(clean);
+      }
+    }
+  }
+  return out;
 }
 
 function showToast(message, type = 'info') {
-  const t = document.createElement('div');
-  t.className = `toast ${type}`;
-  const glyph = { error: '✕', success: '✓', warn: '!', info: '›' }[type] || '›';
-  t.innerHTML = `<span class="toast-glyph">${glyph}</span><span>${esc(message)}</span>`;
-  $('toast-container').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3800);
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  const glyph = { error:'✕', success:'✓', warn:'!', info:'›' }[type] || '›';
+  toast.innerHTML = `<span class="toast-glyph">${glyph}</span><span>${esc(message)}</span>`;
+  document.getElementById('toast-container').appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3800);
 }
 
-const ago = (ms) => { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
-const initial = (name) => { const c = (String(name || '?').trim()[0] || '?').toUpperCase(); return /[\p{L}\p{N}]/u.test(c) ? c : '?'; };
-const pfpHtml = (url, name) => url
-  ? `<img class="pfp" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-initial="${esc(initial(name))}">`
-  : `<div class="pfp">${esc(initial(name))}</div>`;
-document.addEventListener('error', (e) => {
-  const img = e.target;
-  if (img.tagName === 'IMG' && img.classList.contains('pfp')) { const d = document.createElement('div'); d.className = 'pfp'; d.textContent = img.dataset.initial || '?'; img.replaceWith(d); }
-}, true);
+function saveSession() {
+  const uInput = document.getElementById('username-input').value.trim();
+  const sInput = document.getElementById('session-input').value.trim();
+  if (!uInput || !sInput) return showToast('Please enter both Username and Session ID.', 'warn');
+  
+  USERNAME = uInput;
+  SESSION_ID = sInput;
+  localStorage.setItem('nexusUsername', USERNAME);
+  localStorage.setItem('nexusSessionId', SESSION_ID);
+  
+  checkAuth();
+}
 
-function setBusy(btn, busy, label) { btn.classList.toggle('is-busy', busy); if (label) btn.textContent = label; }
+function logoutSession() {
+  localStorage.removeItem('nexusSessionId');
+  location.reload();
+}
 
-/* ================= RENDER ================= */
-let renderQueued = false;
-function queueRender() { if (renderQueued) return; renderQueued = true; requestAnimationFrame(() => { renderQueued = false; render(); }); }
+function checkAuth() {
+  if (SESSION_ID && USERNAME) {
+    loginSection.style.display = 'none';
+    dashboardSection.style.display = 'block';
+    initTikTokSSE();
+    const savedCookie = localStorage.getItem('nexusTikTokCookie');
+    const savedAccountName = localStorage.getItem('nexusTikTokAccountName') || 'Account';
+    if (savedCookie) {
+      apiFetch('/api/tiktok/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountName: savedAccountName, cookie: savedCookie })
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.auth) ttAuth = d.auth;
+          updateTikTokStatusUI();
+        })
+        .catch(() => {});
+    }
+  } else {
+    loginSection.style.display = 'block';
+    dashboardSection.style.display = 'none';
+    if (USERNAME) document.getElementById('username-input').value = USERNAME;
+    if (SESSION_ID) document.getElementById('session-input').value = SESSION_ID;
+  }
+}
+
+function toggleCompactMode() {
+  const on = compactViewToggle.checked;
+  localStorage.setItem('nexusCompactMode', on ? '1' : '0');
+  container.classList.toggle('compact-mode', on);
+}
+
+function computeVisible() {
+  const term = searchInput.value.toLowerCase().trim();
+  const allSharers = Array.from(ttSharersMap.values())
+    .filter(u => !ttBlacklistSet.has(u.uniqueId.toLowerCase()))
+    .sort((a,b) => b.timestamp - a.timestamp);
+  visibleIds = term
+    ? allSharers.filter(u => u.uniqueId.toLowerCase().includes(term)).map(u => u.uniqueId)
+    : allSharers.map(u => u.uniqueId);
+}
+
+function setTargetCount() {
+  const unblocked = Array.from(ttSharersMap.values()).filter(u => !ttBlacklistSet.has(u.uniqueId.toLowerCase())).length;
+  const totalShares = Array.from(ttSharersMap.values()).reduce((acc, u) => acc + (Number(u.shareCount) || 1), 0);
+  document.getElementById('tt-tab-count').innerText = unblocked;
+  document.getElementById('tt-bl-count').innerText = ttBlacklistSet.size;
+  document.getElementById('tt-metric-visible').innerText = unblocked;
+  document.getElementById('tt-metric-total-shares').innerText = totalShares;
+  document.getElementById('tt-metric-blacklisted').innerText = ttBlacklistSet.size;
+}
+
+function handleFilterChange() {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(render, 100);
+}
+
+function queueRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; render(); });
+}
 
 function render() {
-  const term = norm($('search-input').value);
-  const showListed = $('show-listed-toggle').checked;
-  const threshold = Number(S.auth.autoBlockThreshold || 2);
-  const all = [...S.sharers.values()].sort((a, b) => b.timestamp - a.timestamp);
-  const active = all.filter((u) => !S.blacklist.has(u.uniqueId));
-  const shown = all.filter((u) => (showListed || !S.blacklist.has(u.uniqueId)) && (!term || u.uniqueId.includes(term)));
-  S.visible = shown.filter((u) => !S.blacklist.has(u.uniqueId)).map((u) => u.uniqueId);
-
-  $('tt-tab-count').textContent = active.length;
-  $('m-active').textContent = active.length;
-  $('m-shares').textContent = all.reduce((n, u) => n + (Number(u.shareCount) || 1), 0);
-  $('m-blacklisted').textContent = S.blacklist.size;
-  $('tt-bl-count').textContent = S.blacklist.size;
-  $('btn-block-all').disabled = !S.visible.length;
-
-  const container = $('requests-container');
-  const empty = $('empty-state');
-  if (!shown.length) {
+  computeVisible();
+  setTargetCount();
+  if (visibleIds.length === 0) {
     container.style.display = 'none';
-    empty.style.display = 'flex';
-    if (term) { $('empty-title').textContent = 'No matches'; $('empty-body').textContent = 'No sharer matches that filter.'; }
-    else if (all.length) { $('empty-title').textContent = 'Queue clear'; $('empty-body').textContent = 'Everyone who shared is already on the blacklist. Turn on Show blocked to see them.'; }
-    else { $('empty-title').textContent = 'No live shares collected yet'; $('empty-body').textContent = 'Enter a TikTok @username above and click Listen Live. Everyone who shares the LIVE shows up here.'; }
-    S.fresh.clear();
+    emptyState.style.display = 'flex';
     return;
   }
   container.style.display = 'grid';
-  empty.style.display = 'none';
-  container.innerHTML = shown.map((u) => {
-    const listed = S.blacklist.has(u.uniqueId);
-    const handle = u.displayHandle || u.uniqueId;
-    const cls = ['user-card', (u.shareCount || 1) >= threshold ? 'hot' : '', listed ? 'listed' : '', S.fresh.has(u.uniqueId) ? 'fresh' : ''].join(' ');
-    return `<div class="${cls}" data-handle="${esc(u.uniqueId)}">
-      <span class="tt-time-pill">${esc(ago(u.timestamp))}</span>
-      <span class="tt-share-pill">${u.shareCount}× SHARED</span>
-      <div class="pfp-wrap">${pfpHtml(u.profilePictureUrl, u.nickname || handle)}</div>
-      <div class="names">
-        <h2>${esc(u.nickname || handle)}</h2>
-        <p><button type="button" data-act="copy" title="Copy username">@${esc(handle)}</button></p>
-      </div>
-      <div class="actions">${listed
-        ? '<span class="listed-tag">On blacklist</span>'
-        : '<button class="btn" data-act="copy">Copy</button><button class="btn btn-danger" data-act="block">Block</button>'}</div>
+  emptyState.style.display = 'none';
+  const frag = document.createDocumentFragment();
+  for (const id of visibleIds) frag.appendChild(buildTikTokCard(id));
+  container.replaceChildren(frag);
+}
+
+function buildTikTokCard(uniqueId) {
+  const u = ttSharersMap.get(uniqueId);
+  const card = document.createElement('div');
+  card.className = 'user-card';
+  card.innerHTML = `
+    <span class="tt-time-pill">${esc(u.lastSharedAt || '')}</span>
+    <span class="tt-share-pill">${u.shareCount}× SHARED</span>
+    <div class="pfp-wrap"><img src="${esc(u.profilePictureUrl)}" class="pfp" loading="lazy"></div>
+    <div class="names">
+      <h2>${esc(u.nickname)}</h2>
+      <p onclick="copySingleTikTokUser('${esc(u.uniqueId)}')">@${esc(u.uniqueId)}</p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-accept" onclick="copySingleTikTokUser('${esc(u.uniqueId)}')">Copy</button>
+      <button class="btn btn-reject" onclick="blockSingleTikTokUser('${esc(u.uniqueId)}')">Block</button>
     </div>`;
-  }).join('');
-  S.fresh.clear();
+  return card;
 }
 
-function renderStatus() {
-  const a = S.auth, st = S.live;
-  $('tt-autoblock-toggle').checked = !!a.autoBlockSharers;
-  if (a.autoBlockThreshold) $('tt-threshold').value = String(a.autoBlockThreshold);
-  const loginBtn = $('btn-tt-login');
-  loginBtn.textContent = a.loggedIn ? `Auth: @${a.accountName || 'connected'}` : 'TikTok Account';
-  loginBtn.classList.toggle('btn-primary', !!a.loggedIn);
-  $('fast-pill').hidden = !(a.loggedIn && a.fastMode);
+function initTikTokSSE() {
+  if (ttEventSource) ttEventSource.close();
+  const savedUser = localStorage.getItem('nexusTikTokUser');
+  if (savedUser) document.getElementById('tt-username-input').value = savedUser;
 
-  const dot = $('top-tt-dot'), txt = $('top-tt-text');
-  if (a.engineError) { dot.className = 'status-dot error'; txt.textContent = 'TikTok: Needs attention'; }
-  else if (st.connected) { dot.className = 'status-dot live'; txt.textContent = `Live: @${st.username}`; }
-  else if (a.loggedIn) { dot.className = 'status-dot'; txt.textContent = `Auth: @${a.accountName}`; }
-  else { dot.className = 'status-dot offline'; txt.textContent = 'TikTok: Standby'; }
-
-  const wrap = $('tt-live-status');
-  wrap.classList.toggle('is-live', !!st.connected);
-  wrap.classList.toggle('is-error', !st.connected && !!st.error);
-  $('tt-live-status-text').textContent = st.connected ? `Listening to @${st.username}` : st.error ? st.error : 'Listener offline';
-  $('btn-tt-connect').hidden = !!st.connected;
-  $('btn-tt-disconnect').hidden = !st.connected;
-}
-
-function renderMetricsFromAttempts() {
-  $('m-blocked').textContent = S.attempts.filter((a) => a.success).length;
-}
-
-/* ---- floating progress ---- */
-function ensureProgressBar() {
-  let bar = $('job-progress');
-  if (bar) return bar;
-  bar = document.createElement('div');
-  bar.id = 'job-progress';
-  bar.innerHTML = `<div class="jp-head"><span id="jp-label">Working…</span><button id="jp-cancel" class="btn btn-danger" style="padding:4px 8px;">Cancel</button></div>
-    <div class="jp-track"><div id="jp-fill" class="jp-fill"></div></div>
-    <div class="jp-stats"><span class="ok"><b id="jp-ok">0</b> blocked</span><span class="skip"><b id="jp-skip">0</b> already</span><span class="bad"><b id="jp-bad">0</b> failed</span><span class="rate" id="jp-rate"></span></div>
-    <div id="jp-meta" class="jp-meta"></div>`;
-  document.body.appendChild(bar);
-  $('jp-cancel').onclick = cancelJob;
-  return bar;
-}
-let hideTimer = null;
-function renderJob() {
-  const j = S.job;
-  if (!j || j.kind !== 'manual') return;
-  clearTimeout(hideTimer);
-  const bar = ensureProgressBar();
-  const running = j.status === 'running';
-  bar.classList.toggle('done', !running);
-  $('jp-label').textContent = running
-    ? `Blocking ${j.processed}/${j.total}${j.currentUsername ? ` (@${j.currentUsername})` : ''}`
-    : `${j.status === 'cancelled' ? 'Stopped' : 'Done'}: ${j.processed}/${j.total}`;
-  $('jp-fill').style.width = `${Math.round(((j.processed + (j.cancelledCount || 0)) / Math.max(1, j.total)) * 100)}%`;
-  $('jp-ok').textContent = j.blockedOnTikTokCount;
-  $('jp-skip').textContent = j.alreadyCount;
-  $('jp-bad').textContent = j.failedCount;
-  const secs = ((j.finishedAt || Date.now()) - j.startedAt) / 1000;
-  $('jp-rate').textContent = secs > 0.5 && j.processed ? `${(j.processed / secs).toFixed(1)} users/s` : '';
-  const starting = running && !j.processed && ['finding', 'starting'].includes(S.engine?.state);
-  const now = running && S.step ? S.step : '';
-  $('jp-meta').textContent = starting
-    ? "Starting the server's browser… (up to a minute on small servers)"
-    : [now, j.lastNote ? `Last problem: ${j.lastNote}` : ''].filter(Boolean).join('  ·  ');
-  $('jp-cancel').textContent = running ? 'Cancel' : 'Close';
-  if (!running) hideTimer = setTimeout(() => $('job-progress')?.remove(), 6000);
-}
-async function cancelJob() {
-  if (S.job?.status === 'running') { await api(`/api/tiktok/jobs/${S.job.id}`, { method: 'DELETE' }).catch(() => {}); showToast('Stopping…'); }
-  else $('job-progress')?.remove();
-}
-
-/* ---- diagnostics ---- */
-const METHOD = { fast: 'FAST', profile: 'PROFILE', already: 'PROFILE', lookup: 'LOOKUP', error: 'ERROR' };
-function renderDiagnostics() {
-  if (!$('diag-modal').classList.contains('open')) return;
-  const a = S.auth;
-  const ok = S.attempts.filter((x) => x.success).length;
-  $('diag-summary').textContent = `Account: ${a.loggedIn ? '@' + a.accountName : 'not connected'}. Mode: ${a.fastMode ? 'fast' : a.loggedIn ? 'learning (first block uses the profile page)' : 'off'}. ${ok} of ${S.attempts.length} attempts succeeded.${a.engineError ? ' Problem: ' + a.engineError : ''}`;
-  const rows = S.attempts.slice().reverse();
-  $('diag-tbody').innerHTML = rows.length ? rows.map((r) => `<tr>
-    <td class="dim">${esc(new Date(r.timestamp).toLocaleTimeString())}</td>
-    <td class="u">@${esc(r.username)}</td>
-    <td class="dim">${esc(r.userId || '—')}</td>
-    <td>${esc(METHOD[r.vector] || r.vector || '')}</td>
-    <td class="dim">${esc(r.elapsedMs ?? '')}</td>
-    <td class="${r.success ? 'ok' : 'bad'}">${r.success ? (r.note === 'Already blocked' ? 'ALREADY BLOCKED' : 'BLOCKED') : esc(r.note)}</td>
-  </tr>`).join('') : '<tr><td colspan="6" style="padding:14px; text-align:center; color:var(--muted)">No block attempts yet.</td></tr>';
-}
-
-/* ---- server browser setup ---- */
-let engineToastShown = false;
-function renderEngine() {
-  const e = S.engine || {};
-  const box = $('acct-engine');
-  if (e.state === 'downloading') {
-    box.hidden = false;
-    box.textContent = `Setting up the server's browser (first start only): ${e.progress || 0}%. You can connect once this finishes.`;
-    if (!engineToastShown) { engineToastShown = true; showToast('The server is downloading its browser (first start only). Blocking is available in about a minute.', 'info'); }
-  } else if (e.state === 'finding' || e.state === 'starting') {
-    box.hidden = false; box.textContent = 'Starting the server\'s browser… (can take up to a minute on small servers)';
-  } else box.hidden = true;
-  if (e.state === 'error' && e.message && $('acct-modal').classList.contains('open')) { $('acct-err').hidden = false; $('acct-err').textContent = e.message; }
-  if (e.state === 'ready' && engineToastShown) { engineToastShown = false; showToast('Server browser ready.', 'success'); }
-}
-
-/* ================= STREAM ================= */
-function applySnapshot(d) {
-  if (d.state) S.live = d.state;
-  if (d.auth) S.auth = d.auth;
-  if (d.blacklist) S.blacklist = new Set(d.blacklist);
-  if (Array.isArray(d.sharers)) { S.sharers.clear(); d.sharers.forEach((u) => S.sharers.set(u.uniqueId, u)); }
-  if (Array.isArray(d.attempts)) S.attempts = d.attempts;
-  if (d.jobs?.[0]?.status === 'running') { S.job = d.jobs[0]; renderJob(); }
-  if (d.engine) { S.engine = d.engine; renderEngine(); }
-  if (typeof d.step === 'string') S.step = d.step;
-  if (d.blockRequest) store.set('nexusTikTokBlockRequest', JSON.stringify(d.blockRequest));
-  renderStatus(); renderMetricsFromAttempts(); renderDiagnostics(); queueRender();
-}
-
-function initStream() {
-  if (es) es.close();
-  es = new EventSource(`/api/tiktok/stream?sessionId=${encodeURIComponent(SESSION_ID)}&username=${encodeURIComponent(USERNAME)}`);
-  es.onmessage = (ev) => {
-    let d; try { d = JSON.parse(ev.data); } catch { return; }
-    switch (d.type) {
-      case 'INIT': applySnapshot(d); break;
-      case 'STATUS': S.live = d.state; renderStatus(); break;
-      case 'AUTH': S.auth = d.auth; renderStatus(); renderDiagnostics(); queueRender(); break;
-      case 'BLACKLIST': S.blacklist = new Set(d.blacklist); queueRender(); break;
-      case 'SHARE': S.sharers.set(d.user.uniqueId, d.user); S.fresh.add(d.user.uniqueId); queueRender(); break;
-      case 'CLEAR': S.sharers.clear(); queueRender(); break;
-      case 'JOB': onJob(d.job); break;
-      case 'ENGINE': S.engine = d.engine; renderEngine(); if (S.job) renderJob(); break;
-      case 'STEP': S.step = d.step; if (S.job) renderJob(); break;
-      case 'TEMPLATE': if (d.template) store.set('nexusTikTokBlockRequest', JSON.stringify(d.template)); break;
-      case 'ATTEMPT':
-        S.attempts.push(d.attempt);
-        if (S.attempts.length > 300) S.attempts.shift();
-        renderMetricsFromAttempts(); renderDiagnostics();
-        break;
+  apiFetch('/api/tiktok/sharers').then(r=>r.json()).then(data => {
+    if (data.state) ttState = data.state;
+    if (data.auth) ttAuth = data.auth;
+    if (data.blacklist) ttBlacklistSet = new Set(parseCleanUsernames(data.blacklist));
+    updateTikTokStatusUI();
+    if (Array.isArray(data.sharers)) {
+      ttSharersMap.clear();
+      data.sharers.forEach(u => ttSharersMap.set(u.uniqueId, u));
+      queueRender();
     }
+  }).catch(()=>{});
+
+  ttEventSource = new EventSource(`${BACKEND_URL}/api/tiktok/stream?sessionId=${encodeURIComponent(SESSION_ID)}&username=${encodeURIComponent(USERNAME)}`);
+  ttEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'INIT') {
+        ttState = data.state || { connected: false };
+        if (data.auth) ttAuth = data.auth;
+        if (data.blacklist) ttBlacklistSet = new Set(parseCleanUsernames(data.blacklist));
+        ttSharersMap.clear();
+        (data.sharers || []).forEach(u => ttSharersMap.set(u.uniqueId, u));
+        updateTikTokStatusUI(); queueRender();
+      } else if (data.type === 'STATUS') {
+        ttState = data.state || { connected: false }; updateTikTokStatusUI();
+      } else if (data.type === 'AUTH') {
+        if (data.auth) ttAuth = data.auth; updateTikTokStatusUI(); queueRender();
+      } else if (data.type === 'BLACKLIST') {
+        if (data.blacklist) ttBlacklistSet = new Set(parseCleanUsernames(data.blacklist)); queueRender();
+      } else if (data.type === 'SHARE') {
+        ttSharersMap.set(data.user.uniqueId, data.user); queueRender();
+      } else if (data.type === 'CLEAR') {
+        ttSharersMap.clear(); queueRender();
+      }
+    } catch (e) {}
   };
 }
 
-function onJob(j) {
-  if (j.kind === 'manual') {
-    const wasRunning = S.job?.id === j.id && S.job.status === 'running';
-    S.job = j;
-    renderJob();
-    if (wasRunning && j.status !== 'running') {
-      showToast(`Blocked ${j.blockedOnTikTokCount}/${j.total}${j.alreadyCount ? `, ${j.alreadyCount} already blocked` : ''}${j.failedCount ? `, ${j.failedCount} failed` : ''}.`, j.failedCount && !j.blockedOnTikTokCount ? 'warn' : 'success');
+function updateTikTokStatusUI() {
+  const wrap = document.getElementById('tt-live-status');
+  const txt = document.getElementById('tt-live-status-text');
+  const loginBtn = document.getElementById('btn-tt-login');
+  const topDot = document.getElementById('top-tt-dot');
+  const topText = document.getElementById('top-tt-text');
+  
+  if (document.getElementById('tt-autoblock-toggle')) {
+    document.getElementById('tt-autoblock-toggle').checked = Boolean(ttAuth.autoBlockSharers);
+  }
+  
+  if (ttAuth.loggedIn) {
+    loginBtn.innerText = `Auth: @${ttAuth.accountName || 'Connected'}`;
+    loginBtn.classList.add('btn-primary');
+  } else {
+    loginBtn.innerText = 'TikTok Account';
+    loginBtn.classList.remove('btn-primary');
+  }
+
+  if (ttState.connected) {
+    topDot.className = 'status-dot live';
+    topText.innerText = `Live: @${ttState.username}`;
+  } else if (ttAuth.loggedIn) {
+    topDot.className = 'status-dot';
+    topText.innerText = `Auth: @${ttAuth.accountName}`;
+  } else {
+    topDot.className = 'status-dot offline';
+    topText.innerText = 'TikTok: Standby';
+  }
+
+  wrap.classList.toggle('is-live', Boolean(ttState.connected));
+  if (ttState.connected) txt.innerText = `Listening to @${ttState.username}`;
+  else if (ttState.error) txt.innerText = `Error: ${ttState.error}`;
+  else txt.innerText = 'Listener offline';
+}
+
+async function connectTikTokLive() {
+  const username = document.getElementById('tt-username-input').value.trim();
+  if (!username) return showToast('Enter a TikTok @username first.', 'warn');
+  localStorage.setItem('nexusTikTokUser', username);
+  showToast(`Connecting to @${username.replace(/^@/, '')}...`, 'info');
+  try {
+    const res = await apiFetch('/api/tiktok/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      ttState = { connected: false, error: data.error };
+      updateTikTokStatusUI();
+      return showToast(data.error, 'error');
     }
-  } else if (j.kind === 'single' && j.status !== 'running') {
-    if (j.blockedOnTikTokCount) showToast('Blocked on TikTok.', 'success');
-    else if (j.alreadyCount) showToast('Already blocked on your account.', 'info');
-    else if (j.failedCount) showToast(`Couldn't block: ${j.lastNote || 'unknown error'}`, 'error');
-  }
+    ttState = data.state;
+    updateTikTokStatusUI();
+    showToast(`Listening for shares on @${ttState.username}!`, 'success');
+  } catch (e) { showToast('Could not reach backend.', 'error'); }
 }
 
-/* ================= ACTIONS ================= */
-async function startBlocking(handles, { confirmMany = true } = {}) {
-  const list = [...new Set(handles.map(norm).filter(validHandle))];
-  if (!list.length) return showToast('No valid usernames to block.', 'warn');
-  if (S.job?.status === 'running' && list.length > 1) return showToast('A block job is already running.', 'warn');
-  if (confirmMany && list.length > 1 && !confirm(`Block ${list.length} users on @${S.auth.accountName || 'your account'}?`)) return;
-  list.forEach((h) => S.blacklist.add(h));
+async function disconnectTikTokLive() {
+  try {
+    await apiFetch('/api/tiktok/disconnect', { method: 'POST' });
+    ttState = { connected: false, username: null, error: null };
+    updateTikTokStatusUI();
+    showToast('Stopped listener.', 'info');
+  } catch (e) {}
+}
+
+async function clearTikTokSharers() {
+  if (ttSharersMap.size === 0 || !confirm('Clear live sharers log?')) return;
+  try {
+    await apiFetch('/api/tiktok/clear', { method: 'POST' });
+    ttSharersMap.clear();
+    queueRender();
+    showToast('Log cleared.', 'success');
+  } catch (e) {}
+}
+
+function copyAllTikTokSharers() {
+  if (!visibleIds.length) return showToast('No users to copy.', 'warn');
+  navigator.clipboard?.writeText(visibleIds.join('\n'));
+  showToast(`Copied ${visibleIds.length} users!`, 'success');
+}
+
+function copySingleTikTokUser(id) {
+  navigator.clipboard?.writeText(id);
+  showToast(`Copied @${id}`, 'success');
+}
+
+// ---- BLOCKING SYSTEM ----
+
+function ensureProgressBar() {
+  let bar = document.getElementById('job-progress');
+  if (bar) return bar;
+  bar = document.createElement('div');
+  bar.id = 'job-progress';
+  bar.innerHTML = `<div class="jp-head"><span id="jp-label">Working…</span><button id="jp-cancel" class="btn btn-danger" style="width:auto; margin:0; padding:4px 8px;">Cancel</button></div><div class="jp-track"><div id="jp-fill" class="jp-fill"></div></div><div id="jp-meta" class="jp-meta"></div>`;
+  document.body.appendChild(bar);
+  return bar;
+}
+
+function hideProgress() {
+  const b = document.getElementById('job-progress');
+  if (b) b.remove();
+}
+
+async function cancelTikTokJob() {
+  if (!activeTikTokJobId) return;
+  try {
+    await apiFetch(`/api/tiktok/jobs/${activeTikTokJobId}`, { method: 'DELETE' });
+    showToast('Stopping job…', 'info');
+  } catch (e) {}
+}
+
+async function runTikTokBlockJobWithProgress(usernames) {
+  if (activeTikTokJobId) return showToast('Job already running.', 'warn');
+  const cleanTargets = parseCleanUsernames(usernames);
+  if (cleanTargets.length === 0) return showToast('No valid usernames to block.', 'warn');
+
+  try {
+    const res = await apiFetch('/api/tiktok/jobs/block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: cleanTargets })
+    });
+    const job = await res.json();
+    if (!res.ok) return showToast(job.error || 'Failed to start block job.', 'error');
+
+    cleanTargets.forEach(u => ttBlacklistSet.add(u));
+    queueRender();
+    activeTikTokJobId = job.id;
+    showToast(`Blocking ${job.total} users on TikTok...`, 'info');
+    
+    const poll = setInterval(async () => {
+      try {
+        const r = await apiFetch(`/api/tiktok/jobs/${job.id}`);
+        if (!r.ok) { clearInterval(poll); activeTikTokJobId = null; return; }
+        const state = await r.json();
+        
+        ensureProgressBar();
+        document.getElementById('jp-cancel').onclick = cancelTikTokJob;
+        document.getElementById('jp-label').innerText =
+          `Blocking ${state.processed}/${state.total}` +
+          (state.currentUsername ? ` (@${state.currentUsername})` : '');
+        document.getElementById('jp-fill').style.width =
+          `${Math.round((state.processed / Math.max(1, state.total)) * 100)}%`;
+        document.getElementById('jp-meta').innerText =
+          `${state.blockedOnTikTokCount} blocked · ${state.failedCount} failed` +
+          (state.lastNote ? ` · ${state.lastNote}` : '');
+        
+        if (state.status !== 'running') {
+          clearInterval(poll);
+          activeTikTokJobId = null;
+          setTimeout(hideProgress, 3500);
+          showToast(
+            `Blocked ${state.blockedOnTikTokCount}/${state.total} users!` +
+              (state.lastNote && state.blockedOnTikTokCount === 0 ? ` (${state.lastNote})` : ''),
+            state.blockedOnTikTokCount > 0 ? 'success' : 'warn'
+          );
+        }
+      } catch (e) {
+        clearInterval(poll);
+        activeTikTokJobId = null;
+      }
+    }, 500);
+  } catch (e) { showToast('Backend error.', 'error'); }
+}
+
+async function blockSingleTikTokUser(uname) {
+  const clean = parseCleanUsernames([uname])[0];
+  if (!clean) return;
+  ttBlacklistSet.add(clean);
   queueRender();
-  const r = await api('/api/tiktok/jobs/block', { method: 'POST', body: { usernames: list } }).catch(() => null);
-  if (!r) return showToast('Could not reach the server.', 'error');
-  if (r.status === 409) { showToast(r.data.error, 'warn'); openAccount(); return; }
-  if (!r.ok) return showToast(r.data.error || 'Could not start blocking.', 'error');
-  if (r.data.kind === 'manual') { S.job = r.data; renderJob(); }
-  else showToast(`Blocking @${list[0]}…`);
+  try {
+    const res = await apiFetch('/api/tiktok/block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: [clean] })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(
+        data.blockedOnTikTokCount > 0
+          ? `Blocked @${clean} on TikTok!`
+          : `Blacklisted @${clean}${data.note ? ' (' + data.note + ')' : ''}`,
+        data.blockedOnTikTokCount > 0 ? 'success' : 'warn'
+      );
+    }
+  } catch (e) {}
 }
 
-$('login-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const u = $('username-input').value.trim(), s = $('session-input').value.trim();
-  if (!u || !s) return showToast('Please enter both Username and Session ID.', 'warn');
-  USERNAME = u; SESSION_ID = s;
-  store.set('nexusUsername', u); store.set('nexusSessionId', s);
-  boot();
-});
-
-function logoutSession() { store.del('nexusSessionId'); if (es) es.close(); location.reload(); }
-
-$('live-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const user = norm($('tt-username-input').value);
-  if (!validHandle(user)) return showToast('Enter a TikTok @username first.', 'warn');
-  store.set('nexusTikTokUser', user);
-  const btn = $('btn-tt-connect');
-  setBusy(btn, true, 'Connecting');
-  const r = await api('/api/tiktok/connect', { method: 'POST', body: { username: user } }).catch(() => null);
-  setBusy(btn, false, '● Listen Live');
-  if (!r) return showToast('Could not reach backend.', 'error');
-  if (!r.ok) { S.live = { connected: false, error: r.data.error }; renderStatus(); return showToast(r.data.error, 'error'); }
-  S.live = r.data.state; renderStatus();
-  showToast(`Listening for shares on @${user}!`, 'success');
-});
-
-$('btn-tt-disconnect').addEventListener('click', async () => {
-  await api('/api/tiktok/disconnect', { method: 'POST' }).catch(() => {});
-  S.live = { connected: false }; renderStatus();
-  showToast('Stopped listener.');
-});
-
-$('search-input').addEventListener('input', queueRender);
-$('show-listed-toggle').addEventListener('change', queueRender);
-$('compact-view-toggle').addEventListener('change', () => {
-  const on = $('compact-view-toggle').checked;
-  store.set('nexusCompactMode', on ? '1' : '0');
-  $('requests-container').classList.toggle('compact-mode', on);
-});
-
-$('requests-container').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-act]');
-  if (!btn) return;
-  const h = btn.closest('[data-handle]').dataset.handle;
-  if (btn.dataset.act === 'copy') { navigator.clipboard?.writeText(h); showToast(`Copied @${h}`, 'success'); }
-  if (btn.dataset.act === 'block') startBlocking([h], { confirmMany: false });
-});
-
-$('btn-block-all').addEventListener('click', () => {
-  if (!S.visible.length) return showToast('No users in queue.', 'warn');
-  startBlocking([...S.visible]);
-});
-
-$('btn-copy').addEventListener('click', () => {
-  if (!S.visible.length) return showToast('No users to copy.', 'warn');
-  navigator.clipboard?.writeText(S.visible.join('\n'));
-  showToast(`Copied ${S.visible.length} users!`, 'success');
-});
-
-$('btn-clear').addEventListener('click', async () => {
-  if (!S.sharers.size || !confirm('Clear the share log? The blacklist is not affected.')) return;
-  await api('/api/tiktok/clear', { method: 'POST' }).catch(() => {});
-  showToast('Log cleared.', 'success');
-});
-
-$('quick-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const h = norm($('tt-quick-block-input').value);
-  if (!validHandle(h)) return showToast('Enter a valid username.', 'warn');
-  $('tt-quick-block-input').value = '';
-  startBlocking([h], { confirmMany: false });
-});
-
-async function saveAutoBlock() {
-  const enabled = $('tt-autoblock-toggle').checked;
-  const r = await api('/api/tiktok/auto-block', { method: 'POST', body: { enabled, threshold: Number($('tt-threshold').value) } }).catch(() => null);
-  if (r?.ok) { S.auth = r.data.auth; renderStatus(); queueRender(); }
-  showToast(enabled ? `Auto-Block ON (${$('tt-threshold').value}x+ shares).` : 'Auto-Block OFF.', 'info');
-  if (enabled && !S.auth.loggedIn) showToast('Connect your TikTok account so auto-blocks happen on TikTok too.', 'warn');
+async function quickBlockTikTokInput() {
+  const inp = document.getElementById('tt-quick-block-input');
+  const clean = parseCleanUsernames([inp.value])[0];
+  if (!clean) return showToast('Enter a valid username.', 'warn');
+  inp.value = '';
+  await blockSingleTikTokUser(clean);
 }
-$('tt-autoblock-toggle').addEventListener('change', saveAutoBlock);
-$('tt-threshold').addEventListener('change', () => { if ($('tt-autoblock-toggle').checked) saveAutoBlock(); else api('/api/tiktok/auto-block', { method: 'POST', body: { enabled: false, threshold: Number($('tt-threshold').value) } }); });
 
-/* ---- modals ---- */
-function openModal(id) { $(id).classList.add('open'); }
-function closeModal(id) { $(id).classList.remove('open'); }
-document.querySelectorAll('.modal').forEach((m) => {
-  m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-close]')) closeModal(m.id); });
-});
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.querySelectorAll('.modal.open').forEach((m) => closeModal(m.id)); });
-
-function updateListCount() {
-  const n = new Set($('bl-textarea').value.split(/[\r\n,]+/).map(norm).filter(validHandle)).size;
-  $('bl-ta-count').textContent = `${n} valid username${n === 1 ? '' : 's'}`;
-}
-async function openBlacklist() {
-  openModal('bl-modal');
-  $('bl-textarea').value = [...S.blacklist].join('\n');
-  updateListCount();
-  const r = await api('/api/tiktok/blacklist').catch(() => null);
-  if (r?.ok) { $('bl-textarea').value = r.data.text; S.blacklist = new Set(r.data.usernames); updateListCount(); queueRender(); }
-}
-$('bl-textarea').addEventListener('input', updateListCount);
-$('btn-save-list').addEventListener('click', async () => {
-  const r = await api('/api/tiktok/blacklist/save', { method: 'POST', body: { text: $('bl-textarea').value } }).catch(() => null);
-  if (!r?.ok) return showToast('Could not save the blacklist.', 'error');
-  S.blacklist = new Set(r.data.usernames);
-  queueRender();
-  closeModal('bl-modal');
-  showToast(`Saved ${r.data.total} usernames globally.`, 'success');
-});
-$('btn-block-listed').addEventListener('click', () => {
-  const lines = $('bl-textarea').value.split(/[\r\n,]+/);
-  if (!S.auth.loggedIn) { closeModal('bl-modal'); showToast('Connect your TikTok account first.', 'warn'); return openAccount(); }
-  closeModal('bl-modal');
-  startBlocking(lines);
-});
-
-function openAccount() {
-  const a = S.auth;
-  $('tt-cookie-input').value = store.get('nexusTikTokCookie') || '';
-  $('acct-err').hidden = !a.engineError;
-  $('acct-err').textContent = a.engineError || '';
-  $('acct-box').hidden = !a.loggedIn;
-  if (a.loggedIn) {
-    $('acct-pfp').outerHTML = pfpHtml(a.avatar, a.accountName).replace('class="pfp"', 'class="pfp" id="acct-pfp"');
-    $('acct-name').textContent = `@${a.accountName}`;
-    $('acct-sub').textContent = a.fastMode ? 'Connected. Fast mode on.' : 'Connected. Fast mode turns on after the first block.';
+async function blockAllTikTokSharers() {
+  if (visibleIds.length === 0) return showToast('No users in queue.', 'warn');
+  if (confirm(`Block all ${visibleIds.length} sharers on TikTok?`)) {
+    await runTikTokBlockJobWithProgress([...visibleIds]);
   }
-  $('btn-acct-logout').hidden = !a.loggedIn;
-  openModal('acct-modal');
-  renderEngine();
 }
 
-async function connectAccount(cookie, { quiet = false } = {}) {
-  const btn = $('btn-acct-save');
-  if (!quiet) $('acct-err').hidden = true;
-  setBusy(btn, true, 'Checking with TikTok (can take a minute)');
-  let blockRequest = null;
-  try { blockRequest = JSON.parse(store.get('nexusTikTokBlockRequest') || 'null'); } catch {}
-  const r = await api('/api/tiktok/login', { method: 'POST', body: { cookie, blockRequest } }).catch(() => null);
-  setBusy(btn, false, 'Save & Connect');
-  if (!r) { if (!quiet) showToast('Could not reach backend.', 'error'); return false; }
-  if (r.data.auth) { S.auth = r.data.auth; renderStatus(); }
-  if (r.data.blockRequest) store.set('nexusTikTokBlockRequest', JSON.stringify(r.data.blockRequest));
-  if (!r.ok) {
-    if (r.status === 401) store.del('nexusTikTokCookie');
-    if (!quiet) { $('acct-err').hidden = false; $('acct-err').textContent = r.data.error; }
-    else showToast(`TikTok account: ${r.data.error}`, 'warn');
-    return false;
+async function toggleTikTokAutoBlock() {
+  const enabled = document.getElementById('tt-autoblock-toggle').checked;
+  try {
+    await apiFetch('/api/tiktok/auto-block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    ttAuth.autoBlockSharers = enabled;
+    setTargetCount();
+    showToast(enabled ? 'Auto-Block (2x+) ON.' : 'Auto-Block OFF.', 'info');
+  } catch (e) {}
+}
+
+// ---- MODALS ----
+async function openTikTokBlacklistModal() {
+  ttBlacklistModal.style.display = 'flex';
+  try {
+    const res = await apiFetch('/api/tiktok/blacklist');
+    const data = await res.json();
+    const clean = parseCleanUsernames(data.usernames || []);
+    ttBlacklistSet = new Set(clean);
+    ttBlacklistTa.value = clean.join('\n');
+    setTargetCount();
+  } catch (e) {
+    ttBlacklistTa.value = Array.from(ttBlacklistSet).join('\n');
   }
-  return true;
 }
 
-$('btn-acct-save').addEventListener('click', async () => {
-  const cookie = $('tt-cookie-input').value.trim();
-  if (!cookie) return showToast('Paste cookie first.', 'warn');
-  if (await connectAccount(cookie)) {
-    store.set('nexusTikTokCookie', cookie);
-    closeModal('acct-modal');
-    showToast(`Logged in as @${S.auth.accountName}!`, 'success');
+function closeTikTokBlacklistModal() {
+  ttBlacklistModal.style.display = 'none';
+}
+
+async function clearGlobalBlacklist() {
+  if (!confirm('Clear all usernames from the global blacklist?')) return;
+  try {
+    const res = await apiFetch('/api/tiktok/blacklist/clear', { method: 'POST' });
+    if (res.ok) {
+      ttBlacklistSet.clear();
+      ttBlacklistTa.value = '';
+      queueRender();
+      showToast('Cleared global blacklist.', 'success');
+    }
+  } catch (e) {}
+}
+
+async function saveTikTokBlacklistText() {
+  const clean = parseCleanUsernames(ttBlacklistTa.value);
+  try {
+    const res = await apiFetch('/api/tiktok/blacklist/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: clean })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      ttBlacklistSet = new Set(parseCleanUsernames(data.usernames || []));
+      ttBlacklistTa.value = Array.from(ttBlacklistSet).join('\n');
+      queueRender();
+      showToast(`Saved ${data.total} usernames globally.`, 'success');
+      closeTikTokBlacklistModal();
+    }
+  } catch (e) {}
+}
+
+async function blockAllListedTikTokUsers() {
+  const lines = parseCleanUsernames(ttBlacklistTa.value);
+  if (lines.length === 0) return showToast('Type at least one valid username first.', 'warn');
+  if (!ttAuth.loggedIn) return showToast('Click TikTok Account and save your cookie first.', 'warn');
+  closeTikTokBlacklistModal();
+  await runTikTokBlockJobWithProgress(lines);
+}
+
+function openTikTokLoginModal() {
+  ttLoginModal.style.display = 'flex';
+  document.getElementById('tt-account-name-input').value =
+    localStorage.getItem('nexusTikTokAccountName') || ttAuth.accountName || '';
+  document.getElementById('tt-cookie-input').value =
+    localStorage.getItem('nexusTikTokCookie') || '';
+}
+
+function closeTikTokLoginModal() {
+  ttLoginModal.style.display = 'none';
+}
+
+async function saveTikTokLogin() {
+  const accountName = document.getElementById('tt-account-name-input').value.trim();
+  const cookie = document.getElementById('tt-cookie-input').value.trim();
+  if (!cookie) return showToast('Paste your TikTok cookie or sessionid first.', 'warn');
+  localStorage.setItem('nexusTikTokAccountName', accountName);
+  localStorage.setItem('nexusTikTokCookie', cookie);
+  
+  try {
+    const res = await apiFetch('/api/tiktok/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountName, cookie })
+    });
+    const data = await res.json();
+    if (!res.ok) return showToast(data.error, 'error');
+    ttAuth = data.auth;
+    updateTikTokStatusUI();
+    closeTikTokLoginModal();
+    showToast(`Connected TikTok as @${ttAuth.accountName}!`, 'success');
+  } catch (e) {}
+}
+
+async function logoutTikTokAccount() {
+  localStorage.removeItem('nexusTikTokAccountName');
+  localStorage.removeItem('nexusTikTokCookie');
+  try {
+    await apiFetch('/api/tiktok/logout', { method: 'POST' });
+    ttAuth.loggedIn = false;
+    updateTikTokStatusUI();
+    closeTikTokLoginModal();
+  } catch (e) {}
+}
+
+async function openTikTokDiagnosticsModal() {
+  ttDiagModal.style.display = 'flex';
+  await refreshTikTokDiagnostics();
+}
+
+function closeTikTokDiagnosticsModal() {
+  ttDiagModal.style.display = 'none';
+}
+
+async function refreshTikTokDiagnostics() {
+  try {
+    const res = await apiFetch('/api/tiktok/diagnostics');
+    const data = await res.json();
+    const tbody = document.getElementById('tt-diag-tbody');
+    const summary = document.getElementById('tt-diag-summary');
+    if (summary && data.auth) {
+      summary.innerText = `Session: ${data.auth.loggedIn ? '@' + data.auth.accountName : 'Not Logged In'} · Cached Profiles: ${data.cachedProfilesCount || 0}`;
+    }
+    if (!data.recentAttempts?.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="padding:8px; text-align:center;">No block attempts yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.recentAttempts.map(r => `<tr>
+      <td style="padding:8px; border-bottom:1px solid var(--line);">${new Date(r.timestamp).toLocaleTimeString()}</td>
+      <td style="padding:8px; border-bottom:1px solid var(--line); color:var(--cyan);">@${esc(r.username)}</td>
+      <td style="padding:8px; border-bottom:1px solid var(--line);">${esc(r.userId)}</td>
+      <td style="padding:8px; border-bottom:1px solid var(--line);">${esc(r.vector)}</td>
+      <td style="padding:8px; border-bottom:1px solid var(--line); color:${r.success ? 'var(--emerald)' : 'var(--red)'};">${r.success ? 'BLOCKED' : esc(r.note)}</td>
+    </tr>`).join('');
+  } catch (e) {}
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeTikTokBlacklistModal();
+    closeTikTokLoginModal();
+    closeTikTokDiagnosticsModal();
   }
 });
-$('tt-cookie-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btn-acct-save').click(); });
 
-$('btn-acct-logout').addEventListener('click', async () => {
-  store.del('nexusTikTokCookie');
-  await api('/api/tiktok/logout', { method: 'POST' }).catch(() => {});
-  closeModal('acct-modal');
-  showToast('TikTok account disconnected.');
-});
-
-function openDiagnostics() { openModal('diag-modal'); renderDiagnostics(); }
-
-setInterval(() => { if (!document.hidden && S.sharers.size) queueRender(); if (S.job?.status === 'running') renderJob(); }, 15000);
-
-/* ================= BOOT ================= */
-function boot() {
-  if (!SESSION_ID || !USERNAME) {
-    $('login-section').hidden = false;
-    $('dashboard-section').hidden = true;
-    if (USERNAME) $('username-input').value = USERNAME;
-    return;
-  }
-  $('login-section').hidden = true;
-  $('dashboard-section').hidden = false;
-  if (store.get('nexusCompactMode') === '1') { $('compact-view-toggle').checked = true; $('requests-container').classList.add('compact-mode'); }
-  const lastLive = store.get('nexusTikTokUser');
-  if (lastLive) $('tt-username-input').value = lastLive;
-  initStream();
-  const saved = store.get('nexusTikTokCookie');
-  if (saved) api('/api/tiktok/sharers').then((r) => { if (r.ok && !r.data.auth?.loggedIn) connectAccount(saved, { quiet: true }); }).catch(() => {});
+if (localStorage.getItem('nexusCompactMode') === '1') {
+  compactViewToggle.checked = true;
+  container.classList.add('compact-mode');
 }
-boot();
+
+checkAuth();
 </script>
 </body>
 </html>
