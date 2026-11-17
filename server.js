@@ -1,24 +1,22 @@
 'use strict';
 
 /**
- * NEXUS — TikTok LIVE share listener + account blocker.
+ * NEXUS — TikTok LIVE share listener + fast account blocker.
  *
- * Why blocking used to fail: TikTok's web API rejects requests that aren't signed by its
- * in-page security SDK (X-Bogus / X-Gnarly / msToken + a session-bound CSRF token). The old
- * server sent raw axios POSTs with a random CSRF token, so every block was refused, and user
- * lookups from a server IP were mostly answered with empty pages ("User not found").
- *
- * The block engine now runs a headless Chrome per logged-in session. Requests are made from
- * inside a real tiktok.com page, so TikTok's own SDK signs them. The first block per account
- * is done through the profile page UI (… → Block → Block); the exact request TikTok sends is
- * recorded and replayed for later users, which is much faster. If the fast path stops working
- * the engine falls back to the UI automatically.
+ * TikTok refuses block requests that aren't signed by the security script on its own pages,
+ * which is why plain server-side requests always failed. This server keeps one hidden Chrome
+ * tab open on tiktok.com per connected account and fires the block requests from inside it,
+ * many at once, so TikTok's script signs every one. No page clicking in the normal case:
+ * the profile page is only opened as a fallback if TikTok's request format changes.
  */
+
+const path = require('path');
+// Keep Chrome inside the project folder (hosts like Render drop ~/.cache between build and run).
+process.env.PUPPETEER_CACHE_DIR ||= path.join(__dirname, '.cache', 'puppeteer');
 
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
-const path = require('path');
 const cors = require('cors');
 
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -39,16 +37,17 @@ const CONFIG = {
     navTimeoutMs: 30000,
   },
   block: {
-    concurrency: Math.max(1, Math.min(6, Number(process.env.BLOCK_CONCURRENCY) || 3)),
-    gapMinMs: 350,
-    gapMaxMs: 900,
+    // Parallel block requests per account. Raise for speed, lower if TikTok starts rate-limiting.
+    concurrency: Math.max(1, Math.min(24, Number(process.env.BLOCK_CONCURRENCY) || 10)),
+    uiPages: 2, // profile-page fallback tabs
+    staggerMs: 25,
     uiResponseTimeoutMs: 12000,
-    pauseOnLimitMs: 90000,
+    pauseOnLimitMs: 45000,
     maxStrikes: 3,
-    apiFailuresBeforeUi: 3,
+    apiFailuresBeforeUi: 4,
   },
   share: { dedupWindowMs: 1200, defaultThreshold: 2 },
-  sessionIdleMs: 30 * 60 * 1000,
+  sessionIdleMs: 3 * 60 * 60 * 1000,
 };
 
 const UA =
@@ -65,7 +64,6 @@ const log = {
   error: (...a) => console.error(`[${ts()}] [error]`, ...a),
 };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-const jitter = (a, b) => a + Math.floor(Math.random() * (b - a));
 const safeJson = (t) => {
   try {
     return JSON.parse(t);
@@ -429,14 +427,40 @@ const classifyTikTokReply = (status, text) => {
   return { ok: false, code: 'rejected', note: msg ? `TikTok said: ${msg}` : `TikTok code ${code ?? 'unknown'} (HTTP ${status})` };
 };
 
+const DEFAULT_BLOCK_GUESSES = [
+  {
+    url: 'https://www.tiktok.com/api/user/block/?aid=1988&app_language=en&app_name=tiktok_web&channel=tiktok_web&device_platform=web_pc&user_id={{uid}}&sec_user_id={{sec}}&block_type=1&source=3&msToken={{msToken}}',
+    body: '',
+    contentType: null,
+  },
+  {
+    url: 'https://www.tiktok.com/api/user/block/?aid=1988&app_language=en&app_name=tiktok_web&channel=tiktok_web&device_platform=web_pc&msToken={{msToken}}',
+    body: 'user_id={{uid}}&sec_user_id={{sec}}&block_type=1&source=0',
+    contentType: 'application/x-www-form-urlencoded',
+  },
+];
+
+function mutex() {
+  let tail = Promise.resolve();
+  return (fn) => {
+    const run = tail.then(fn, fn);
+    tail = run.catch(() => {});
+    return run;
+  };
+}
+
 class TikTokAccount {
   constructor(session, cookies) {
     this.session = session;
     this.cookies = cookies;
     this.context = null;
-    this.pages = [];
-    this.free = [];
-    this.waiters = [];
+    this.apiPage = null; // stays on tiktok.com; every fast request runs here in parallel
+    this.uiPages = [];
+    this.uiFree = [];
+    this.uiWaiters = [];
+    this.learn = mutex(); // only one worker figures out the block request at a time
+    this.probed = false;
+    this.detailWorks = false;
     this.me = null;
     this.ready = false;
   }
@@ -462,21 +486,15 @@ class TikTokAccount {
   async loadHome(page) {
     await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 15000 }).catch(() => {});
-    await delay(800);
+    await delay(600);
   }
 
   async open() {
     const browser = await getBrowser();
     this.context = await browser.createBrowserContext();
-    const cookieData = this.cookies.map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: '.tiktok.com',
-      path: '/',
-      secure: true,
-      sameSite: 'None',
-    }));
-    await this.context.setCookie(...cookieData);
+    await this.context.setCookie(
+      ...this.cookies.map((c) => ({ name: c.name, value: c.value, domain: '.tiktok.com', path: '/', secure: true, sameSite: 'None' }))
+    );
 
     const page = await this.newPage();
     await this.loadHome(page);
@@ -484,81 +502,113 @@ class TikTokAccount {
       throw new EngineError('captcha', 'TikTok showed a captcha to the server. Wait a few minutes, or run the server from a home connection.');
     }
 
-    const scope = await readScope(page);
-    let me = scope?.['webapp.app-context']?.user;
-    let info = me?.uid ? { uid: String(me.uid), uniqueId: me.uniqueId, nickname: me.nickName, secUid: me.secUid, avatar: me.avatarUri?.[0] || '' } : null;
-
+    const me = (await readScope(page))?.['webapp.app-context']?.user;
+    let info = me?.uid ? { uid: String(me.uid), uniqueId: me.uniqueId, nickname: me.nickName, avatar: me.avatarUri?.[0] || '' } : null;
     if (!info) {
       const r = await pageXhr(page, { url: 'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_name=tiktok_web' });
       const d = safeJson(r.text)?.data;
       if (d && (d.user_id_str || d.user_id)) {
-        info = { uid: String(d.user_id_str || d.user_id), uniqueId: d.username, nickname: d.screen_name, secUid: d.sec_user_id, avatar: d.avatar_url || '' };
+        info = { uid: String(d.user_id_str || d.user_id), uniqueId: d.username, nickname: d.screen_name, avatar: d.avatar_url || '' };
       }
     }
-    if (!info) {
-      throw new EngineError('not_logged_in', 'TikTok did not accept this cookie. Copy a fresh one while logged in on tiktok.com.');
-    }
+    if (!info) throw new EngineError('not_logged_in', 'TikTok did not accept this cookie. Copy a fresh one while logged in on tiktok.com.');
+
     this.me = info;
-    this.pages = [page];
-    this.free = [page];
+    this.apiPage = page;
     this.ready = true;
     log.info(`[${this.session.username}] TikTok engine ready as @${info.uniqueId} (${info.uid})`);
     return info;
   }
 
-  async acquirePage() {
-    if (this.free.length) return this.free.pop();
-    if (this.pages.length < CONFIG.block.concurrency) {
-      const p = await this.newPage();
-      this.pages.push(p);
-      await this.loadHome(p).catch(() => {});
-      return p;
-    }
-    return new Promise((res) => this.waiters.push(res));
+  async ensureApiPage() {
+    if (this.apiPage && !this.apiPage.isClosed()) return this.apiPage;
+    this.apiPage = await this.newPage();
+    await this.loadHome(this.apiPage);
+    return this.apiPage;
   }
 
-  releasePage(p) {
-    if (p.isClosed()) {
-      this.pages = this.pages.filter((x) => x !== p);
-      return;
+  async withUiPage(fn) {
+    let page = this.uiFree.pop();
+    if (!page) {
+      if (this.uiPages.length < CONFIG.block.uiPages) {
+        page = await this.newPage();
+        this.uiPages.push(page);
+      } else {
+        page = await new Promise((res) => this.uiWaiters.push(res));
+        if (!page) throw new EngineError('closed', 'Account disconnected');
+      }
     }
-    const w = this.waiters.shift();
-    if (w) w(p);
-    else this.free.push(p);
+    try {
+      return await fn(page);
+    } finally {
+      if (page.isClosed()) this.uiPages = this.uiPages.filter((p) => p !== page);
+      else {
+        const w = this.uiWaiters.shift();
+        if (w) w(page);
+        else this.uiFree.push(page);
+      }
+    }
   }
 
   async close() {
     this.ready = false;
     const ctx = this.context;
     this.context = null;
-    this.pages = [];
-    this.free = [];
-    this.waiters.splice(0).forEach((w) => w(null));
+    this.apiPage = null;
+    this.uiPages = [];
+    this.uiFree = [];
+    this.uiWaiters.splice(0).forEach((w) => w(null));
     if (ctx) await ctx.close().catch(() => {});
   }
 
   get template() {
     return templates.data[this.me?.uid] || null;
   }
+  get fastHealthy() {
+    const t = this.template;
+    return Boolean(t && t.failures < CONFIG.block.apiFailuresBeforeUi);
+  }
 
-  async resolveIds(page, handle) {
+  /** Returns ids, or { missing: note } when TikTok says the account doesn't exist, or null if unknown. */
+  async resolveIds(handle) {
     const known = knownProfile(handle);
     if (known) return known;
-    const url = `https://www.tiktok.com/api/user/detail/?aid=1988&app_language=en&app_name=tiktok_web&device_platform=web_pc&uniqueId=${encodeURIComponent(handle)}&secUid=`;
+    const page = await this.ensureApiPage();
+    const url = `https://www.tiktok.com/api/user/detail/?aid=1988&app_language=en&app_name=tiktok_web&device_platform=web_pc&uniqueId=${encodeURIComponent(handle)}&secUid=&msToken={{msToken}}`;
     const r = await pageXhr(page, { url }).catch(() => null);
-    const u = safeJson(r?.text)?.userInfo?.user;
+    const j = safeJson(r?.text);
+    const u = j?.userInfo?.user;
     if (u?.id && u?.secUid) {
+      this.detailWorks = true;
       rememberProfile(handle, { userId: u.id, secUid: u.secUid, nickname: u.nickname });
       return knownProfile(handle);
+    }
+    if (this.detailWorks && j && Number(j.statusCode) && !u?.id) {
+      return { missing: `@${handle} doesn't exist or is banned (TikTok code ${j.statusCode})` };
     }
     return null;
   }
 
-  async blockViaApi(page, ids) {
-    const t = this.template;
-    const fill = (s) => s.split('{{uid}}').join(ids.userId).split('{{sec}}').join(ids.secUid);
-    const r = await pageXhr(page, { method: 'POST', url: fill(t.url), body: fill(t.body) || null, contentType: t.contentType });
+  async sendBlock(tpl, ids) {
+    const page = await this.ensureApiPage();
+    const fill = (s) => String(s || '').split('{{uid}}').join(ids.userId).split('{{sec}}').join(ids.secUid);
+    const r = await pageXhr(page, { method: 'POST', url: fill(tpl.url), body: fill(tpl.body) || null, contentType: tpl.contentType });
     return classifyTikTokReply(r.status, r.text);
+  }
+
+  /** Tries the usual TikTok block request so the first block doesn't need the profile page. */
+  async probeGuesses(ids) {
+    for (const g of DEFAULT_BLOCK_GUESSES) {
+      const r = await this.sendBlock(g, ids);
+      if (r.ok) {
+        templates.data[this.me.uid] = { ...g, learnedAt: Date.now(), failures: 0, source: 'guess' };
+        templates.save();
+        log.info(`[${this.session.username}] Fast block request works — no profile clicks needed.`);
+        return { ...r, vector: 'fast' };
+      }
+      if (r.code === 'rate_limited') return { ...r, vector: 'fast' };
+    }
+    return null;
   }
 
   async blockViaUi(page, handle) {
@@ -577,30 +627,27 @@ class TikTokAccount {
     await page
       .waitForSelector('[data-e2e="user-title"], [data-e2e="user-subtitle"], [data-e2e="follow-button"], h1', { timeout: 10000 })
       .catch(() => {});
-    await delay(500);
+    await delay(350);
 
-    if (await clickTarget(page, { texts: UNBLOCK_WORDS, hoverOnly: true })) {
-      return { ok: true, already: true, ids };
-    }
+    if (await clickTarget(page, { texts: UNBLOCK_WORDS, hoverOnly: true })) return { ok: true, already: true, ids };
 
     const responseP = page
       .waitForResponse((r) => isBlockRequest(r.request()), { timeout: CONFIG.block.uiResponseTimeoutMs })
       .catch(() => null);
 
-    // Open the "…" menu (hover first, then click if the menu didn't appear)
     if (!(await clickTarget(page, { selectors: MORE_SELECTORS, hoverOnly: true }))) {
       return { ok: false, code: 'ui_changed', note: "Couldn't find the … menu on the profile page", ids };
     }
-    await delay(450);
+    await delay(350);
     let clickedMenu = await clickTarget(page, { texts: BLOCK_WORDS });
     if (!clickedMenu) {
       await clickTarget(page, { selectors: MORE_SELECTORS });
-      await delay(450);
+      await delay(400);
       clickedMenu = await clickTarget(page, { texts: BLOCK_WORDS });
     }
     if (!clickedMenu) return { ok: false, code: 'ui_changed', note: "Couldn't find Block in the profile menu", ids };
 
-    await delay(600);
+    await delay(450);
     const confirmed = await clickTarget(page, {
       texts: BLOCK_WORDS,
       within: '[role="dialog"], [class*="Modal"], [class*="modal"], [class*="Dialog"]',
@@ -612,33 +659,50 @@ class TikTokAccount {
       if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
       return { ok: false, code: 'no_response', note: 'Clicked Block but TikTok sent no block request', ids };
     }
-    const text = await resp.text().catch(() => '');
-    const verdict = classifyTikTokReply(resp.status(), text);
+    const verdict = classifyTikTokReply(resp.status(), await resp.text().catch(() => ''));
     if (verdict.ok && ids?.userId && ids?.secUid) {
-      templates.data[this.me.uid] = learnTemplate(resp.request(), ids);
+      templates.data[this.me.uid] = { ...learnTemplate(resp.request(), ids), source: 'profile' };
       templates.save();
-      log.info(`[${this.session.username}] Learned TikTok block request — fast mode on.`);
+      log.info(`[${this.session.username}] Learned TikTok's block request — fast mode on.`);
     }
     return { ...verdict, ids };
   }
 
-  async block(page, handle) {
-    const tpl = this.template;
-    if (tpl && tpl.failures < CONFIG.block.apiFailuresBeforeUi) {
-      const ids = await this.resolveIds(page, handle);
-      if (ids) {
-        const r = await this.blockViaApi(page, ids);
-        if (r.ok) {
-          if (tpl.failures) ((tpl.failures = 0), templates.save());
-          return { ...r, vector: 'fast', ids };
-        }
-        if (r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
-        tpl.failures++;
-        templates.save();
-      }
-    }
-    const r = await this.blockViaUi(page, handle);
+  async uiBlock(handle) {
+    const r = await this.withUiPage((page) => this.blockViaUi(page, handle));
     return { ...r, vector: r.already ? 'already' : 'profile' };
+  }
+
+  async block(handle) {
+    const ids = await this.resolveIds(handle);
+    if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
+
+    if (ids && this.fastHealthy) {
+      const r = await this.sendBlock(this.template, ids);
+      if (r.ok || r.code === 'rate_limited') {
+        if (r.ok && this.template.failures) ((this.template.failures = 0), templates.save());
+        return { ...r, vector: 'fast', ids };
+      }
+      this.template.failures++;
+      templates.save();
+    }
+
+    if (!this.fastHealthy) {
+      // Until we know a working request, one worker at a time works it out; the rest then go fast.
+      return this.learn(async () => {
+        if (ids && this.fastHealthy) {
+          const r = await this.sendBlock(this.template, ids);
+          if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
+        }
+        if (ids && !this.probed) {
+          this.probed = true;
+          const r = await this.probeGuesses(ids);
+          if (r) return { ...r, ids };
+        }
+        return this.uiBlock(handle);
+      });
+    }
+    return this.uiBlock(handle);
   }
 }
 
@@ -676,7 +740,7 @@ class ClientSession {
       autoBlockSharers: a.autoBlockSharers,
       autoBlockThreshold: a.autoBlockThreshold,
       engineError: a.engineError,
-      fastMode: Boolean(this.account?.template && this.account.template.failures < CONFIG.block.apiFailuresBeforeUi),
+      fastMode: Boolean(this.account?.fastHealthy),
     };
   }
 
@@ -750,8 +814,22 @@ function broadcastBlacklist() {
 // BLOCK QUEUE
 // ============================================================================
 function publicJob(j) {
-  const { items, ...rest } = j;
+  const { _timer, ...rest } = j;
   return rest;
+}
+
+function pushJob(session, job, force = false) {
+  if (force || job.status !== 'running') {
+    clearTimeout(job._timer);
+    job._timer = null;
+    session.broadcast({ type: 'JOB', job: publicJob(job) });
+    return;
+  }
+  if (job._timer) return;
+  job._timer = setTimeout(() => {
+    job._timer = null;
+    session.broadcast({ type: 'JOB', job: publicJob(job) });
+  }, 120);
 }
 
 function createJob(session, handles, kind = 'manual') {
@@ -770,6 +848,7 @@ function createJob(session, handles, kind = 'manual') {
     startedAt: Date.now(),
     finishedAt: null,
     cancelRequested: false,
+    _timer: null,
   };
   session.jobs.set(job.id, job);
   if (session.jobs.size > 50) session.jobs.delete(session.jobs.keys().next().value);
@@ -782,7 +861,7 @@ function createJob(session, handles, kind = 'manual') {
     } else session.queue.push({ handle: h, job });
   }
   finishJobIfDone(session, job);
-  session.broadcast({ type: 'JOB', job: publicJob(job) });
+  pushJob(session, job, true);
   ensureWorkers(session);
   return job;
 }
@@ -796,41 +875,34 @@ function finishJobIfDone(session, job) {
   }
 }
 
-function ensureWorkers(session) {
-  if (!session.queue.length) return;
-  if (!session.cookies) {
-    for (const it of session.queue.splice(0)) {
-      it.job.processed++;
-      it.job.failedCount++;
-      it.job.lastNote = 'Connect your TikTok account first';
-      finishJobIfDone(session, it.job);
-      session.broadcast({ type: 'JOB', job: publicJob(it.job) });
-    }
-    return;
-  }
-  const want = Math.min(CONFIG.block.concurrency, session.queue.length);
-  while (session.workers < want) {
-    session.workers++;
-    runWorker(session)
-      .catch((e) => log.error('Worker crashed:', e))
-      .finally(() => {
-        session.workers--;
-        if (session.queue.length && session.cookies && !session.opening) setTimeout(() => ensureWorkers(session), 500);
-      });
-  }
-}
-
 function failQueue(session, note) {
+  const touched = new Set();
   for (const it of session.queue.splice(0)) {
     it.job.processed++;
     it.job.failedCount++;
     it.job.lastNote = note;
     finishJobIfDone(session, it.job);
-    session.broadcast({ type: 'JOB', job: publicJob(it.job) });
+    touched.add(it.job);
+  }
+  touched.forEach((j) => pushJob(session, j, true));
+}
+
+function ensureWorkers(session) {
+  if (!session.queue.length) return;
+  if (!session.cookies) return failQueue(session, 'Connect your TikTok account first');
+  const want = Math.min(CONFIG.block.concurrency, session.queue.length);
+  while (session.workers < want) {
+    const lane = session.workers++;
+    runWorker(session, lane)
+      .catch((e) => log.error('Worker crashed:', e))
+      .finally(() => {
+        session.workers--;
+        if (session.queue.length && session.cookies && !session.opening) setTimeout(() => ensureWorkers(session), 300);
+      });
   }
 }
 
-async function runWorker(session) {
+async function runWorker(session, lane) {
   let account;
   try {
     account = await session.ensureAccount();
@@ -839,6 +911,7 @@ async function runWorker(session) {
     return;
   }
   if (!account) return;
+  if (lane) await delay(lane * CONFIG.block.staggerMs);
 
   while (session.queue.length && account.ready) {
     const wait = session.pausedUntil - Date.now();
@@ -849,23 +922,23 @@ async function runWorker(session) {
     if (job.cancelRequested) {
       job.cancelledCount++;
       finishJobIfDone(session, job);
+      pushJob(session, job);
       continue;
     }
-
     job.currentUsername = handle;
-    session.broadcast({ type: 'JOB', job: publicJob(job) });
+    pushJob(session, job);
 
     const started = Date.now();
-    const page = await account.acquirePage();
-    if (!page) break;
     let result;
     try {
-      result = await account.block(page, handle);
+      result = await account.block(handle);
     } catch (e) {
-      result = { ok: false, code: 'error', note: e.message.split('\n')[0], vector: 'error' };
-      if (/Target closed|Session closed|detached|Protocol error/i.test(e.message)) page.close().catch(() => {});
-    } finally {
-      account.releasePage(page);
+      result = { ok: false, code: 'error', note: String(e.message).split('\n')[0], vector: 'error' };
+      if (/Target closed|Session closed|detached|Execution context was destroyed/i.test(e.message)) {
+        session.queue.unshift(item); // page died mid-request; retry this user once the page is back
+        await delay(500);
+        continue;
+      }
     }
 
     if (result.code === 'captcha' || result.code === 'rate_limited') {
@@ -876,15 +949,15 @@ async function runWorker(session) {
         job.failedCount++;
         job.lastNote = result.note;
         session.recordAttempt({ username: handle, userId: result.ids?.userId || '', success: false, vector: result.vector, note: result.note, elapsedMs: Date.now() - started });
-        failQueue(session, `${result.note} — stopped. Try again in a few minutes.`);
         finishJobIfDone(session, job);
-        session.broadcast({ type: 'JOB', job: publicJob(job) });
+        pushJob(session, job, true);
+        failQueue(session, `${result.note}. Stopped — try again in a few minutes.`);
         break;
       }
       session.pausedUntil = Date.now() + CONFIG.block.pauseOnLimitMs;
-      job.lastNote = `${result.note} — pausing ${Math.round(CONFIG.block.pauseOnLimitMs / 1000)}s`;
+      job.lastNote = `${result.note}. Pausing ${Math.round(CONFIG.block.pauseOnLimitMs / 1000)}s`;
       session.queue.unshift(item);
-      session.broadcast({ type: 'JOB', job: publicJob(job) });
+      pushJob(session, job, true);
       continue;
     }
     session.strikes = 0;
@@ -907,10 +980,9 @@ async function runWorker(session) {
       elapsedMs: Date.now() - started,
     });
     finishJobIfDone(session, job);
-    session.broadcast({ type: 'JOB', job: publicJob(job) });
-    if (result.vector === 'profile' && result.ok) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
-
-    await delay(jitter(CONFIG.block.gapMinMs, CONFIG.block.gapMaxMs));
+    pushJob(session, job);
+    if (result.ok && result.vector !== 'fast' && account.fastHealthy) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
+    if (result.ok && result.vector === 'fast' && job.blockedOnTikTokCount === 1) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
   }
 }
 
