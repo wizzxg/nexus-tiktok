@@ -526,7 +526,8 @@ function renderJob() {
   $('jp-bad').textContent = j.failedCount;
   const secs = ((j.finishedAt || Date.now()) - j.startedAt) / 1000;
   $('jp-rate').textContent = secs > 0.5 && j.processed ? `${(j.processed / secs).toFixed(1)} users/s` : '';
-  $('jp-meta').textContent = j.lastNote ? `Last problem: ${j.lastNote}` : '';
+  const starting = running && !j.processed && ['finding', 'starting'].includes(S.engine?.state);
+  $('jp-meta').textContent = starting ? "Starting the server's browser… (up to a minute on small servers)" : j.lastNote ? `Last problem: ${j.lastNote}` : '';
   $('jp-cancel').textContent = running ? 'Cancel' : 'Close';
   if (!running) hideTimer = setTimeout(() => $('job-progress')?.remove(), 6000);
 }
@@ -562,8 +563,8 @@ function renderEngine() {
     box.hidden = false;
     box.textContent = `Setting up the server's browser (first start only): ${e.progress || 0}%. You can connect once this finishes.`;
     if (!engineToastShown) { engineToastShown = true; showToast('The server is downloading its browser (first start only). Blocking is available in about a minute.', 'info'); }
-  } else if (e.state === 'finding') {
-    box.hidden = false; box.textContent = 'Starting the server\'s browser…';
+  } else if (e.state === 'finding' || e.state === 'starting') {
+    box.hidden = false; box.textContent = 'Starting the server\'s browser… (can take up to a minute on small servers)';
   } else box.hidden = true;
   if (e.state === 'error' && e.message && $('acct-modal').classList.contains('open')) { $('acct-err').hidden = false; $('acct-err').textContent = e.message; }
   if (e.state === 'ready' && engineToastShown) { engineToastShown = false; showToast('Server browser ready.', 'success'); }
@@ -594,7 +595,7 @@ function initStream() {
       case 'SHARE': S.sharers.set(d.user.uniqueId, d.user); S.fresh.add(d.user.uniqueId); queueRender(); break;
       case 'CLEAR': S.sharers.clear(); queueRender(); break;
       case 'JOB': onJob(d.job); break;
-      case 'ENGINE': S.engine = d.engine; renderEngine(); break;
+      case 'ENGINE': S.engine = d.engine; renderEngine(); if (S.job) renderJob(); break;
       case 'ATTEMPT':
         S.attempts.push(d.attempt);
         if (S.attempts.length > 300) S.attempts.shift();
@@ -771,7 +772,8 @@ function openAccount() {
 
 async function connectAccount(cookie, { quiet = false } = {}) {
   const btn = $('btn-acct-save');
-  setBusy(btn, true, 'Checking with TikTok');
+  if (!quiet) $('acct-err').hidden = true;
+  setBusy(btn, true, 'Checking with TikTok (can take a minute)');
   const r = await api('/api/tiktok/login', { method: 'POST', body: { cookie } }).catch(() => null);
   setBusy(btn, false, 'Save & Connect');
   if (!r) { if (!quiet) showToast('Could not reach backend.', 'error'); return false; }
