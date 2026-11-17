@@ -27,11 +27,25 @@ const CONFIG = {
   },
 };
 
+// ============================================================================
+// TELEMETRY & LOGGING
+// ============================================================================
+const telemetryRingBuffer = [];
+function pushTelemetry(level, scope, message) {
+  telemetryRingBuffer.push({ id: crypto.randomUUID(), at: new Date().toISOString(), level, scope, message });
+  if (telemetryRingBuffer.length > 200) telemetryRingBuffer.shift();
+}
+
+const log = {
+  info: (...a) => { const msg = a.join(' '); console.log(`[${new Date().toISOString()}] [info]`, msg); pushTelemetry('info', 'system', msg); },
+  warn: (...a) => { const msg = a.join(' '); console.warn(`[${new Date().toISOString()}] [warn]`, msg); pushTelemetry('warn', 'system', msg); },
+  error: (...a) => { const msg = a.join(' '); console.error(`[${new Date().toISOString()}] [error]`, msg); pushTelemetry('error', 'system', msg); }
+};
+
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 const httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 60000, maxSockets: 128, rejectUnauthorized: true });
 const tiktokHttp = axios.create({ httpsAgent, timeout: CONFIG.tiktok.resolveTimeoutMs, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36', Accept: 'application/json, text/plain, */*' }, validateStatus: () => true });
 
-// Universal Global Profile Cache (Shared across all users to maximize speed)
 const tiktokProfileCache = new Map();
 
 // ============================================================================
