@@ -575,7 +575,7 @@ async function runTikTokBlockJobWithProgress(usernames) {
           showToast(`Blocked ${state.blockedOnTikTokCount}/${state.total} users!`, state.blockedOnTikTokCount > 0 ? 'success' : 'warn');
         }
       } catch (e) { clearInterval(poll); activeTikTokJobId = null; }
-    }, 250);
+    }, 400); // Polling changed to 400ms to prevent timeout disconnects
   } catch (e) { showToast('Backend error.', 'error'); }
 }
 
@@ -631,6 +631,14 @@ async function saveTikTokBlacklistText() {
       showToast(`Saved ${data.total} usernames globally.`, 'success'); closeTikTokBlacklistModal();
     }
   } catch (e) {}
+}
+
+async function blockAllListedTikTokUsers() {
+  // Correctly splits the textarea line-by-line instead of letter-by-letter
+  const lines = ttBlacklistTa.value.split('\n').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
+  if (lines.length === 0) return;
+  if (!ttAuth.loggedIn) return showToast('Log in first.', 'warn');
+  closeTikTokBlacklistModal(); await runTikTokBlockJobWithProgress(lines);
 }
 
 async function blockAllListedTikTokUsers() {
