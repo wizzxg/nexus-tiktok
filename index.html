@@ -331,7 +331,7 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
     <ol class="steps">
       <li>Open tiktok.com in Opera GX (or any browser) and make sure you're logged in.</li>
       <li>Press Ctrl+Shift+I, open the <b>Network</b> tab, then press F5 to reload the page.</li>
-      <li>Click the first request named <code>www.tiktok.com</code>, find <b>Request Headers</b>, right-click the <code>cookie</code> line and choose Copy value.</li>
+      <li>Click the top row whose Type is <code>document</code>, scroll to <b>Request Headers</b>, right-click the <code>cookie</code> line and choose Copy value.</li>
       <li>Paste it below. Copying only <code>sessionid</code> sometimes isn't enough.</li>
     </ol>
     <label class="field-label" for="tt-cookie-input">Cookie string</label>
@@ -528,7 +528,10 @@ function renderJob() {
   const secs = ((j.finishedAt || Date.now()) - j.startedAt) / 1000;
   $('jp-rate').textContent = secs > 0.5 && j.processed ? `${(j.processed / secs).toFixed(1)} users/s` : '';
   const starting = running && !j.processed && ['finding', 'starting'].includes(S.engine?.state);
-  $('jp-meta').textContent = starting ? "Starting the server's browser… (up to a minute on small servers)" : j.lastNote ? `Last problem: ${j.lastNote}` : '';
+  const now = running && S.step ? S.step : '';
+  $('jp-meta').textContent = starting
+    ? "Starting the server's browser… (up to a minute on small servers)"
+    : [now, j.lastNote ? `Last problem: ${j.lastNote}` : ''].filter(Boolean).join('  ·  ');
   $('jp-cancel').textContent = running ? 'Cancel' : 'Close';
   if (!running) hideTimer = setTimeout(() => $('job-progress')?.remove(), 6000);
 }
@@ -580,6 +583,7 @@ function applySnapshot(d) {
   if (Array.isArray(d.attempts)) S.attempts = d.attempts;
   if (d.jobs?.[0]?.status === 'running') { S.job = d.jobs[0]; renderJob(); }
   if (d.engine) { S.engine = d.engine; renderEngine(); }
+  if (typeof d.step === 'string') S.step = d.step;
   renderStatus(); renderMetricsFromAttempts(); renderDiagnostics(); queueRender();
 }
 
@@ -597,6 +601,7 @@ function initStream() {
       case 'CLEAR': S.sharers.clear(); queueRender(); break;
       case 'JOB': onJob(d.job); break;
       case 'ENGINE': S.engine = d.engine; renderEngine(); if (S.job) renderJob(); break;
+      case 'STEP': S.step = d.step; if (S.job) renderJob(); break;
       case 'ATTEMPT':
         S.attempts.push(d.attempt);
         if (S.attempts.length > 300) S.attempts.shift();
