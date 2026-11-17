@@ -44,7 +44,11 @@ const CONFIG = {
     concurrency: Math.max(1, Math.min(24, Number(process.env.BLOCK_CONCURRENCY) || 10)),
     uiPages: process.env.LOW_MEMORY === '0' ? 2 : 1, // profile-page fallback tabs
     staggerMs: 25,
-    uiResponseTimeoutMs: 12000,
+    uiReadyTimeoutMs: 45000, // wait for the profile page's buttons to start working
+    uiDialogTimeoutMs: 15000,
+    uiResponseTimeoutMs: 60000,
+    uiAfterConfirmMs: 15000,
+    uiFailuresBeforeStop: 2, // stop a job instead of grinding through the list when clicks don't work
     pauseOnLimitMs: 45000,
     maxStrikes: 3,
     apiFailuresBeforeUi: 4,
@@ -547,6 +551,16 @@ async function clickTarget(page, { selectors = [], texts = [], within = null, ho
   return true;
 }
 
+/** Keeps looking for an element until it appears (slow pages), then clicks it. */
+async function waitForClick(page, opts, timeoutMs) {
+  const until = Date.now() + timeoutMs;
+  do {
+    if (await clickTarget(page, opts)) return true;
+    await delay(400);
+  } while (Date.now() < until);
+  return false;
+}
+
 const BLOCK_WORDS = ['Block', 'Bloquear', 'Bloquer', 'Blockieren', 'Blocca', 'Blokir', 'Engelle', 'Заблокировать', 'Заблокувати', 'Zablokuj', 'Blokkeren', 'Chặn', 'ブロック', '차단', '屏蔽', '封鎖', 'حظر', 'Blockera', 'Bloker', 'Blokker', 'Blokuj'];
 const UNBLOCK_WORDS = ['Unblock', 'Desbloquear', 'Débloquer', 'Blockierung aufheben', 'Sblocca', 'Buka blokir', 'Engeli kaldır', 'Разблокировать', 'Розблокувати', 'Odblokuj', 'Deblokkeren', 'Bỏ chặn', 'ブロックを解除', '차단 해제', '取消屏蔽', '解除封鎖', 'إلغاء الحظر', 'Avblockera'];
 const MORE_SELECTORS = [
@@ -559,10 +573,10 @@ const MORE_SELECTORS = [
 ];
 
 const isBlockRequest = (req) => {
-  if (req.method() !== 'POST') return false;
+  if (req.method() === 'GET' || req.method() === 'OPTIONS') return false;
   try {
     const u = new URL(req.url());
-    return /tiktok\.com$/i.test(u.hostname) && /\/api\/.*block/i.test(u.pathname) && !/unblock/i.test(u.pathname);
+    return /tiktok/i.test(u.hostname) && /block/i.test(u.pathname) && !/unblock|block_?list/i.test(u.pathname);
   } catch {
     return false;
   }
@@ -905,13 +919,14 @@ class TikTokAccount {
         return { ...r, vector: 'fast' };
       }
       if (r.code === 'rate_limited') return { ...r, vector: 'fast' };
+      log.info(`[${this.session.username}] Direct block request not accepted (${r.note}); using the profile page once to learn it.`);
     }
     return null;
   }
 
   async blockViaUi(page, handle) {
     await page.goto(`https://www.tiktok.com/@${encodeURIComponent(handle)}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 15000 }).catch(() => {});
+    await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 20000 }).catch(() => {});
     if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
 
     const detail = (await readScope(page))?.['webapp.user-detail'];
@@ -922,48 +937,77 @@ class TikTokAccount {
       return { ok: false, code: 'not_found', note: `@${handle} doesn't exist or is banned (TikTok code ${detail.statusCode})` };
     }
 
+    // On slow servers TikTok's buttons exist long before they respond to clicks. Wait until the
+    // page has finished wiring them up (React attaches its handlers to the element).
     await page
-      .waitForSelector('[data-e2e="user-title"], [data-e2e="user-subtitle"], [data-e2e="follow-button"], h1', { timeout: 10000 })
+      .waitForFunction(
+        (sels) => {
+          const el = sels.map((s) => document.querySelector(s)).find(Boolean);
+          return el && Object.keys(el).some((k) => k.startsWith('__reactProps') || k.startsWith('__reactFiber'));
+        },
+        { timeout: CONFIG.block.uiReadyTimeoutMs, polling: 500 },
+        [...MORE_SELECTORS, '[data-e2e="follow-button"]']
+      )
       .catch(() => {});
-    await delay(350);
 
     if (await clickTarget(page, { texts: UNBLOCK_WORDS, hoverOnly: true })) return { ok: true, already: true, ids };
 
+    // Watch every write request TikTok makes after we click, so a failure can say what happened.
+    const seen = [];
+    const onReq = (r) => {
+      if (r.method() === 'GET' || r.method() === 'OPTIONS') return;
+      try {
+        const u = new URL(r.url());
+        if (/tiktok/i.test(u.hostname) && !/log|monitor|slardar|mcs|mon\./i.test(u.hostname + u.pathname)) seen.push(u.pathname);
+      } catch {}
+    };
+    page.on('request', onReq);
     const responseP = page
       .waitForResponse((r) => isBlockRequest(r.request()), { timeout: CONFIG.block.uiResponseTimeoutMs })
       .catch(() => null);
 
-    if (!(await clickTarget(page, { selectors: MORE_SELECTORS, hoverOnly: true }))) {
-      return { ok: false, code: 'ui_changed', note: "Couldn't find the … menu on the profile page", ids };
-    }
-    await delay(350);
-    let clickedMenu = await clickTarget(page, { texts: BLOCK_WORDS });
-    if (!clickedMenu) {
-      await clickTarget(page, { selectors: MORE_SELECTORS });
-      await delay(400);
-      clickedMenu = await clickTarget(page, { texts: BLOCK_WORDS });
-    }
-    if (!clickedMenu) return { ok: false, code: 'ui_changed', note: "Couldn't find Block in the profile menu", ids };
+    try {
+      // Open the "…" menu and wait for the Block item to show up.
+      if (!(await waitForClick(page, { selectors: MORE_SELECTORS, hoverOnly: true }, 8000))) {
+        return { ok: false, code: 'ui_changed', note: "Couldn't find the … menu on the profile page", ids };
+      }
+      let clickedMenu = await waitForClick(page, { texts: BLOCK_WORDS }, 6000);
+      if (!clickedMenu) {
+        await clickTarget(page, { selectors: MORE_SELECTORS });
+        clickedMenu = await waitForClick(page, { texts: BLOCK_WORDS }, 8000);
+      }
+      if (!clickedMenu) return { ok: false, code: 'ui_changed', note: "Couldn't find Block in the profile menu", ids };
 
-    await delay(450);
-    const confirmed = await clickTarget(page, {
-      texts: BLOCK_WORDS,
-      within: '[role="dialog"], [class*="Modal"], [class*="modal"], [class*="Dialog"]',
-    });
-    if (!confirmed) await clickTarget(page, { texts: BLOCK_WORDS });
+      // Wait for the confirmation box, then press its Block button.
+      const confirmed = await waitForClick(
+        page,
+        { texts: BLOCK_WORDS, within: '[role="dialog"], [class*="Modal"], [class*="modal"], [class*="Dialog"]' },
+        CONFIG.block.uiDialogTimeoutMs
+      );
+      if (!confirmed) await clickTarget(page, { texts: BLOCK_WORDS });
 
-    const resp = await responseP;
-    if (!resp) {
-      if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
-      return { ok: false, code: 'no_response', note: 'Clicked Block but TikTok sent no block request', ids };
+      // The request goes out right after confirming, so don't wait long once that's done.
+      const resp = await Promise.race([responseP, delay(CONFIG.block.uiAfterConfirmMs).then(() => null)]);
+      if (!resp) {
+        if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
+        const sent = [...new Set(seen)].slice(0, 4);
+        return {
+          ok: false,
+          code: 'no_response',
+          note: `Pressed Block${confirmed ? ' and confirmed' : ' (no confirmation box appeared)'}, but TikTok sent no block request${sent.length ? `. Requests seen: ${sent.join(', ')}` : ''}`,
+          ids,
+        };
+      }
+      const verdict = classifyTikTokReply(resp.status(), await resp.text().catch(() => ''));
+      if (verdict.ok && ids?.userId && ids?.secUid) {
+        templates.data[this.me.uid] = { ...learnTemplate(resp.request(), ids), source: 'profile' };
+        templates.save();
+        log.info(`[${this.session.username}] Learned TikTok's block request (${new URL(resp.url()).pathname}) — fast mode on.`);
+      }
+      return { ...verdict, ids };
+    } finally {
+      page.off('request', onReq);
     }
-    const verdict = classifyTikTokReply(resp.status(), await resp.text().catch(() => ''));
-    if (verdict.ok && ids?.userId && ids?.secUid) {
-      templates.data[this.me.uid] = { ...learnTemplate(resp.request(), ids), source: 'profile' };
-      templates.save();
-      log.info(`[${this.session.username}] Learned TikTok's block request — fast mode on.`);
-    }
-    return { ...verdict, ids };
   }
 
   async uiBlock(handle) {
@@ -989,6 +1033,9 @@ class TikTokAccount {
     if (!this.fastHealthy) {
       // Until we know a working request, one worker at a time works it out; the rest then go fast.
       return this.learn(async () => {
+        if ((this.session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop) {
+          return { ok: false, code: 'stopped', note: this.session.uiStopNote || 'Stopped', vector: 'profile' };
+        }
         if (ids && this.fastHealthy) {
           const r = await this.sendBlock(this.template, ids);
           if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
@@ -1153,6 +1200,8 @@ function createJob(session, handles, kind = 'manual') {
     cancelRequested: false,
     _timer: null,
   };
+  session.uiFails = 0;
+  session.uiStopNote = null;
   session.jobs.set(job.id, job);
   if (session.jobs.size > 50) session.jobs.delete(session.jobs.keys().next().value);
 
@@ -1265,6 +1314,10 @@ async function runWorker(session, lane) {
     }
     session.strikes = 0;
 
+    if (result.code === 'ui_changed' || result.code === 'no_response') {
+      session.uiFails = (session.uiFails || 0) + 1;
+    } else if (result.ok) session.uiFails = 0;
+
     job.processed++;
     if (result.ok) {
       addToLedger(account.me.uid, handle);
@@ -1274,7 +1327,7 @@ async function runWorker(session, lane) {
       job.failedCount++;
       job.lastNote = result.note;
     }
-    session.recordAttempt({
+    if (result.code !== 'stopped') session.recordAttempt({
       username: handle,
       userId: result.ids?.userId || knownProfile(handle)?.userId || '',
       success: Boolean(result.ok),
@@ -1284,6 +1337,11 @@ async function runWorker(session, lane) {
     });
     finishJobIfDone(session, job);
     pushJob(session, job);
+    if ((session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop && !account.fastHealthy && result.code !== 'stopped') {
+      session.uiStopNote = `Stopped: TikTok's Block button didn't work ${CONFIG.block.uiFailuresBeforeStop} times in a row. Last problem: ${result.note}`;
+      failQueue(session, session.uiStopNote);
+      break;
+    }
     if (result.ok && result.vector !== 'fast' && account.fastHealthy) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
     if (result.ok && result.vector === 'fast' && job.blockedOnTikTokCount === 1) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
   }
