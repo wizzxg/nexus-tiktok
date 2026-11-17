@@ -1,13 +1,13 @@
 {
   "name": "nexus-tiktok-engine",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "description": "Multi-Tenant TikTok Live Listener & Fast-Blocker",
   "main": "server.js",
   "engines": {
     "node": ">=18.17"
   },
   "scripts": {
-    "start": "node --max-old-space-size=1024 server.js"
+    "start": "node --max-old-space-size=200 --optimize-for-size server.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
