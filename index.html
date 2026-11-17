@@ -584,6 +584,7 @@ function applySnapshot(d) {
   if (d.jobs?.[0]?.status === 'running') { S.job = d.jobs[0]; renderJob(); }
   if (d.engine) { S.engine = d.engine; renderEngine(); }
   if (typeof d.step === 'string') S.step = d.step;
+  if (d.blockRequest) store.set('nexusTikTokBlockRequest', JSON.stringify(d.blockRequest));
   renderStatus(); renderMetricsFromAttempts(); renderDiagnostics(); queueRender();
 }
 
@@ -602,6 +603,7 @@ function initStream() {
       case 'JOB': onJob(d.job); break;
       case 'ENGINE': S.engine = d.engine; renderEngine(); if (S.job) renderJob(); break;
       case 'STEP': S.step = d.step; if (S.job) renderJob(); break;
+      case 'TEMPLATE': if (d.template) store.set('nexusTikTokBlockRequest', JSON.stringify(d.template)); break;
       case 'ATTEMPT':
         S.attempts.push(d.attempt);
         if (S.attempts.length > 300) S.attempts.shift();
@@ -780,10 +782,13 @@ async function connectAccount(cookie, { quiet = false } = {}) {
   const btn = $('btn-acct-save');
   if (!quiet) $('acct-err').hidden = true;
   setBusy(btn, true, 'Checking with TikTok (can take a minute)');
-  const r = await api('/api/tiktok/login', { method: 'POST', body: { cookie } }).catch(() => null);
+  let blockRequest = null;
+  try { blockRequest = JSON.parse(store.get('nexusTikTokBlockRequest') || 'null'); } catch {}
+  const r = await api('/api/tiktok/login', { method: 'POST', body: { cookie, blockRequest } }).catch(() => null);
   setBusy(btn, false, 'Save & Connect');
   if (!r) { if (!quiet) showToast('Could not reach backend.', 'error'); return false; }
   if (r.data.auth) { S.auth = r.data.auth; renderStatus(); }
+  if (r.data.blockRequest) store.set('nexusTikTokBlockRequest', JSON.stringify(r.data.blockRequest));
   if (!r.ok) {
     if (r.status === 401) store.del('nexusTikTokCookie');
     if (!quiet) { $('acct-err').hidden = false; $('acct-err').textContent = r.data.error; }
