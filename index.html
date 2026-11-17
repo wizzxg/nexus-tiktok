@@ -114,7 +114,7 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .modal-close { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; }
 textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: var(--cyan); border: 1px solid var(--line-2); border-radius: var(--r-xs); padding: 13px; font-family: var(--mono); font-size: 12px; margin-bottom: 16px; resize: vertical; outline: none; }
 .modal-ta:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
-.modal-actions { display: flex; justify-content: space-between; align-items: center; }
+.modal-actions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
 
 #toast-container { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 1100; max-width: 370px; }
 .toast { display: flex; align-items: flex-start; gap: 11px; background: rgba(15,19,32,0.96); backdrop-filter: blur(10px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: var(--r-xs); padding: 12px 15px; font-size: 12.5px; animation: slideIn 0.25s both; transition: 0.25s; }
@@ -358,7 +358,21 @@ function checkAuth() {
     loginSection.style.display = 'none';
     dashboardSection.style.display = 'block';
     initTikTokSSE();
-    apiFetch('/api/tiktok/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountName: localStorage.getItem('nexusTikTokAccountName')||'Account' }) }).then(r=>r.json()).then(d=>{if(d.auth) ttAuth = d.auth; updateTikTokStatusUI();}).catch(()=>{});
+    const savedCookie = localStorage.getItem('nexusTikTokCookie');
+    const savedAccountName = localStorage.getItem('nexusTikTokAccountName') || 'Account';
+    if (savedCookie) {
+      apiFetch('/api/tiktok/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountName: savedAccountName, cookie: savedCookie })
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.auth) ttAuth = d.auth;
+          updateTikTokStatusUI();
+        })
+        .catch(() => {});
+    }
   } else {
     loginSection.style.display = 'block';
     dashboardSection.style.display = 'none';
@@ -452,7 +466,7 @@ function initTikTokSSE() {
     }
   }).catch(()=>{});
 
-  ttEventSource = new EventSource(`${BACKEND_URL}/api/tiktok/stream?sessionId=${SESSION_ID}&username=${USERNAME}`);
+  ttEventSource = new EventSource(`${BACKEND_URL}/api/tiktok/stream?sessionId=${encodeURIComponent(SESSION_ID)}&username=${encodeURIComponent(USERNAME)}`);
   ttEventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
@@ -551,12 +565,21 @@ async function cancelTikTokJob() {
 
 async function runTikTokBlockJobWithProgress(usernames) {
   if (activeTikTokJobId) return showToast('Job already running.', 'warn');
+  const cleanTargets = [...new Set(usernames.map(u => String(u || '').trim().replace(/^@+/, '').toLowerCase()).filter(u => u.length >= 2))];
+  if (cleanTargets.length === 0) return showToast('No valid usernames to block.', 'warn');
+
   try {
-    usernames.forEach(u => ttBlacklistSet.add(u.toLowerCase())); queueRender();
-    const res = await apiFetch('/api/tiktok/jobs/block', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usernames }) });
+    cleanTargets.forEach(u => ttBlacklistSet.add(u));
+    queueRender();
+    const res = await apiFetch('/api/tiktok/jobs/block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: cleanTargets })
+    });
     const job = await res.json();
     if (!res.ok) return showToast(job.error, 'error');
-    activeTikTokJobId = job.id; showToast(`Fast-blocking ${job.total} users...`, 'info');
+    activeTikTokJobId = job.id;
+    showToast(`Fast-blocking ${job.total} users...`, 'info');
     
     const poll = setInterval(async () => {
       try {
@@ -566,33 +589,51 @@ async function runTikTokBlockJobWithProgress(usernames) {
         
         const bar = ensureProgressBar();
         document.getElementById('jp-cancel').onclick = cancelTikTokJob;
-        document.getElementById('jp-label').innerText = `Blocking ${state.processed}/${state.total}`;
+        document.getElementById('jp-label').innerText = `Blocking ${state.processed}/${state.total}` + (state.currentUsername ? ` (@${state.currentUsername})` : '');
         document.getElementById('jp-fill').style.width = `${Math.round((state.processed/Math.max(1,state.total))*100)}%`;
-        document.getElementById('jp-meta').innerText = `${state.blockedOnTikTokCount} blocked · ${state.failedCount} failed`;
+        document.getElementById('jp-meta').innerText = `${state.blockedOnTikTokCount} blocked · ${state.failedCount} failed` + (state.lastNote ? ` · ${state.lastNote}` : '');
         
         if (state.status !== 'running') {
-          clearInterval(poll); activeTikTokJobId = null; setTimeout(hideProgress, 2500);
-          showToast(`Blocked ${state.blockedOnTikTokCount}/${state.total} users!`, state.blockedOnTikTokCount > 0 ? 'success' : 'warn');
+          clearInterval(poll);
+          activeTikTokJobId = null;
+          setTimeout(hideProgress, 3000);
+          showToast(
+            `Blocked ${state.blockedOnTikTokCount}/${state.total} users!` + (state.lastNote && state.blockedOnTikTokCount === 0 ? ` (${state.lastNote})` : ''),
+            state.blockedOnTikTokCount > 0 ? 'success' : 'warn'
+          );
         }
       } catch (e) { clearInterval(poll); activeTikTokJobId = null; }
-    }, 400); // Polling changed to 400ms to prevent timeout disconnects
+    }, 400);
   } catch (e) { showToast('Backend error.', 'error'); }
 }
 
 async function blockSingleTikTokUser(uname) {
-  ttBlacklistSet.add(uname.toLowerCase()); queueRender();
+  const clean = String(uname || '').trim().replace(/^@+/, '');
+  if (clean.length < 2) return;
+  ttBlacklistSet.add(clean.toLowerCase());
+  queueRender();
   try {
-    const res = await apiFetch('/api/tiktok/block', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usernames: [uname] }) });
+    const res = await apiFetch('/api/tiktok/block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usernames: [clean] })
+    });
     const data = await res.json();
-    if (res.ok && data.success) showToast(data.blockedOnTikTokCount > 0 ? `Blocked @${uname}` : `Blacklisted @${uname}`, data.blockedOnTikTokCount > 0 ? 'success' : 'info');
+    if (res.ok && data.success) {
+      showToast(
+        data.blockedOnTikTokCount > 0 ? `Blocked @${clean}` : `Blacklisted @${clean}${data.note ? ' (' + data.note + ')' : ''}`,
+        data.blockedOnTikTokCount > 0 ? 'success' : 'info'
+      );
+    }
   } catch (e) {}
 }
 
 async function quickBlockTikTokInput() {
   const inp = document.getElementById('tt-quick-block-input');
   const uname = inp.value.trim().replace(/^@+/, '');
-  if (!uname) return showToast('Enter a username.', 'warn');
-  inp.value = ''; await blockSingleTikTokUser(uname);
+  if (!uname || uname.length < 2) return showToast('Enter a valid username.', 'warn');
+  inp.value = '';
+  await blockSingleTikTokUser(uname);
 }
 
 async function blockAllTikTokSharers() {
@@ -615,7 +656,7 @@ async function openTikTokBlacklistModal() {
   try {
     const res = await apiFetch('/api/tiktok/blacklist');
     const data = await res.json();
-    ttBlacklistSet = new Set(data.usernames.map(u => u.toLowerCase()));
+    ttBlacklistSet = new Set((data.usernames || []).map(u => u.toLowerCase()));
     ttBlacklistTa.value = data.text || '';
     setTargetCount();
   } catch (e) { ttBlacklistTa.value = Array.from(ttBlacklistSet).join('\n'); }
@@ -624,33 +665,36 @@ function closeTikTokBlacklistModal() { ttBlacklistModal.style.display = 'none'; 
 
 async function saveTikTokBlacklistText() {
   try {
-    const res = await apiFetch('/api/tiktok/blacklist/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: ttBlacklistTa.value }) });
+    const res = await apiFetch('/api/tiktok/blacklist/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: ttBlacklistTa.value })
+    });
     const data = await res.json();
     if (res.ok && data.success) {
-      ttBlacklistSet = new Set((data.usernames || []).map(u => u.toLowerCase())); queueRender();
-      showToast(`Saved ${data.total} usernames globally.`, 'success'); closeTikTokBlacklistModal();
+      ttBlacklistSet = new Set((data.usernames || []).map(u => u.toLowerCase()));
+      queueRender();
+      showToast(`Saved ${data.total} usernames globally.`, 'success');
+      closeTikTokBlacklistModal();
     }
   } catch (e) {}
 }
 
 async function blockAllListedTikTokUsers() {
-  // Correctly splits the textarea line-by-line instead of letter-by-letter
-  const lines = ttBlacklistTa.value.split('\n').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
-  if (lines.length === 0) return;
-  if (!ttAuth.loggedIn) return showToast('Log in first.', 'warn');
-  closeTikTokBlacklistModal(); await runTikTokBlockJobWithProgress(lines);
-}
-
-async function blockAllListedTikTokUsers() {
-  const lines = ttBlacklistTa.value.split(/\r?\n/).map(s => s.trim().replace(/^@/, '')).filter(Boolean);
-  if (lines.length === 0) return;
-  if (!ttAuth.loggedIn) return showToast('Log in first.', 'warn');
-  closeTikTokBlacklistModal(); await runTikTokBlockJobWithProgress(lines);
+  const lines = ttBlacklistTa.value
+    .split(/\r?\n/)
+    .map(s => s.trim().replace(/^@+/, ''))
+    .filter(s => s.length >= 2);
+  if (lines.length === 0) return showToast('No valid usernames in the list.', 'warn');
+  if (!ttAuth.loggedIn) return showToast('Log in via TikTok Account button first.', 'warn');
+  closeTikTokBlacklistModal();
+  await runTikTokBlockJobWithProgress(lines);
 }
 
 function openTikTokLoginModal() {
   ttLoginModal.style.display = 'flex';
   document.getElementById('tt-account-name-input').value = localStorage.getItem('nexusTikTokAccountName') || ttAuth.accountName || '';
+  document.getElementById('tt-cookie-input').value = localStorage.getItem('nexusTikTokCookie') || '';
 }
 function closeTikTokLoginModal() { ttLoginModal.style.display = 'none'; }
 
@@ -659,18 +703,32 @@ async function saveTikTokLogin() {
   const cookie = document.getElementById('tt-cookie-input').value.trim();
   if (!cookie) return showToast('Paste cookie first.', 'warn');
   localStorage.setItem('nexusTikTokAccountName', accountName);
+  localStorage.setItem('nexusTikTokCookie', cookie);
   
   try {
-    const res = await apiFetch('/api/tiktok/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountName, cookie }) });
+    const res = await apiFetch('/api/tiktok/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountName, cookie })
+    });
     const data = await res.json();
     if (!res.ok) return showToast(data.error, 'error');
-    ttAuth = data.auth; updateTikTokStatusUI(); closeTikTokLoginModal(); showToast('Logged In!', 'success');
+    ttAuth = data.auth;
+    updateTikTokStatusUI();
+    closeTikTokLoginModal();
+    showToast('Logged In!', 'success');
   } catch (e) {}
 }
 
 async function logoutTikTokAccount() {
   localStorage.removeItem('nexusTikTokAccountName');
-  try { await apiFetch('/api/tiktok/logout', { method: 'POST' }); ttAuth.loggedIn = false; updateTikTokStatusUI(); closeTikTokLoginModal(); } catch (e) {}
+  localStorage.removeItem('nexusTikTokCookie');
+  try {
+    await apiFetch('/api/tiktok/logout', { method: 'POST' });
+    ttAuth.loggedIn = false;
+    updateTikTokStatusUI();
+    closeTikTokLoginModal();
+  } catch (e) {}
 }
 
 async function openTikTokDiagnosticsModal() { ttDiagModal.style.display = 'flex'; await refreshTikTokDiagnostics(); }
@@ -698,7 +756,7 @@ if (ttBlacklistTa) {
   ttBlacklistTa.addEventListener('input', () => {
     clearTimeout(ttPrewarmDebounce);
     ttPrewarmDebounce = setTimeout(() => {
-      const lines = ttBlacklistTa.value.split(/\r?\n/).map(s => s.trim().replace(/^@+/, '')).filter(Boolean);
+      const lines = ttBlacklistTa.value.split(/\r?\n/).map(s => s.trim().replace(/^@+/, '')).filter(s => s.length >= 2);
       if (lines.length) apiFetch('/api/tiktok/prewarm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usernames: lines }) }).catch(()=>{});
     }, 300);
   });
