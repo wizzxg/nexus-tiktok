@@ -29,14 +29,20 @@ const CONFIG = {
     ledger: path.join(DATA_DIR, 'tiktok_blocked.json'),
     templates: path.join(DATA_DIR, 'tiktok_block_template.json'),
   },
+  // Low-memory mode (default) keeps everything inside ~512 MB: a single-process headless browser
+  // that only runs while blocking. Set LOW_MEMORY=0 on bigger machines for a bit more speed.
+  lowMemory: process.env.LOW_MEMORY !== '0',
   browser: {
     headless: process.env.HEADFUL !== '1',
-    navTimeoutMs: 30000,
+    // Close the browser after this long without blocks (it reopens automatically when needed).
+    idleCloseMs: Number(process.env.BROWSER_IDLE_MS) || 3 * 60 * 1000,
+    // Slow hosts (e.g. Render Free, 0.1 CPU) need much longer to load TikTok's page.
+    navTimeoutMs: Number(process.env.NAV_TIMEOUT_MS) || 90000,
   },
   block: {
     // Parallel block requests per account. Raise for speed, lower if TikTok starts rate-limiting.
     concurrency: Math.max(1, Math.min(24, Number(process.env.BLOCK_CONCURRENCY) || 10)),
-    uiPages: 2, // profile-page fallback tabs
+    uiPages: process.env.LOW_MEMORY === '0' ? 2 : 1, // profile-page fallback tabs
     staggerMs: 25,
     uiResponseTimeoutMs: 12000,
     pauseOnLimitMs: 45000,
@@ -198,6 +204,7 @@ let browserPromise = null;
 let browserError = null;
 let browserPath = null;
 let browserSetup = null;
+let lastBrowserUse = Date.now();
 const engineStatus = { state: 'idle', progress: 0, message: '' };
 
 const BROWSER_CACHE = path.join(__dirname, '.cache', 'puppeteer');
@@ -253,8 +260,12 @@ async function findDownloadedChrome() {
   ].filter(Boolean);
   for (const cacheDir of [...new Set(dirs)]) {
     try {
-      const found = (await getInstalledBrowsers({ cacheDir })).filter((b) => b.browser === 'chrome' && fs.existsSync(b.executablePath));
-      found.sort((a, b) => String(b.buildId).localeCompare(String(a.buildId), undefined, { numeric: true }));
+      const found = (await getInstalledBrowsers({ cacheDir })).filter(
+        (b) => (b.browser === 'chrome-headless-shell' || b.browser === 'chrome') && fs.existsSync(b.executablePath)
+      );
+      // The headless-only build uses noticeably less memory, so it wins when present.
+      const rank = (b) => (b.browser === 'chrome-headless-shell' ? 1 : 0);
+      found.sort((a, b) => rank(b) - rank(a) || String(b.buildId).localeCompare(String(a.buildId), undefined, { numeric: true }));
       if (found[0]) return found[0].executablePath;
     } catch {}
   }
@@ -263,13 +274,15 @@ async function findDownloadedChrome() {
 
 async function downloadChrome() {
   const { install, Browser, detectBrowserPlatform } = loadBrowsers();
-  const buildId = loadPuppeteer().PUPPETEER_REVISIONS?.chrome || require('puppeteer-core').PUPPETEER_REVISIONS.chrome;
+  const revisions = loadPuppeteer().PUPPETEER_REVISIONS || require('puppeteer-core').PUPPETEER_REVISIONS;
+  const browser = CONFIG.lowMemory ? Browser.CHROMEHEADLESSSHELL : Browser.CHROME;
+  const buildId = CONFIG.lowMemory ? revisions['chrome-headless-shell'] : revisions.chrome;
   const platform = detectBrowserPlatform();
   if (!platform) throw new Error(`Chrome can't be downloaded for this system (${process.platform}/${process.arch}). Install Chrome or Chromium on the server.`);
   log.info(`No browser found on the server — downloading Chrome ${buildId} into .cache (first start only)…`);
   setEngineStatus('downloading', 'Downloading Chrome for the server (first start only)…', 0);
   const installed = await install({
-    browser: Browser.CHROME,
+    browser,
     buildId,
     platform,
     cacheDir: BROWSER_CACHE,
@@ -287,9 +300,12 @@ async function resolveBrowserPath() {
   browserSetup = (async () => {
     setEngineStatus('finding', 'Looking for a browser on the server…', 0);
     const fromEnv = [process.env.PUPPETEER_EXECUTABLE_PATH, process.env.CHROME_PATH].find((p) => p && fs.existsSync(p));
+    const downloaded = await findDownloadedChrome();
+    const preferShell = CONFIG.lowMemory && downloaded && /headless-shell/i.test(downloaded);
     const found =
       fromEnv ||
-      (await findDownloadedChrome()) ||
+      (preferShell ? downloaded : null) ||
+      downloaded ||
       systemBrowserPaths().find((p) => {
         try {
           return fs.existsSync(p);
@@ -330,20 +346,47 @@ async function getBrowser() {
   }
   browserPromise = (async () => {
     const executablePath = await resolveBrowserPath();
+    setEngineStatus('starting', "Starting the server's browser…", 0);
+    const shell = /headless[-_]shell/i.test(executablePath);
+    const lowMemArgs = CONFIG.lowMemory
+      ? [
+          // One process instead of ~5: saves ~60 MB. Works because low-memory mode keeps one
+          // account in the browser's default profile (separate profiles need multi-process).
+          '--single-process',
+          '--no-zygote',
+          '--renderer-process-limit=1',
+          '--disable-site-isolation-trials',
+          '--disk-cache-size=1048576',
+          '--media-cache-size=1',
+          '--aggressive-cache-discard',
+          '--disable-software-rasterizer',
+          '--disable-component-update',
+          '--disable-domain-reliability',
+          '--disable-breakpad',
+          '--blink-settings=imagesEnabled=false',
+        ]
+      : ['--renderer-process-limit=2'];
     return loadPuppeteer().launch({
-      headless: CONFIG.browser.headless,
+      headless: shell ? 'shell' : CONFIG.browser.headless,
       executablePath,
       args: [
+        ...lowMemArgs,
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
         '--no-first-run',
         '--no-default-browser-check',
+        '--disable-gpu',
+        '--disable-extensions',
+        '--disable-sync',
+        '--disable-default-apps',
+        '--mute-audio',
+        '--disable-background-networking',
+        '--disable-features=Translate,BackForwardCache,MediaRouter,OptimizationHints,site-per-process,IsolateOrigins',
         '--lang=en-US',
-        '--window-size=1366,900',
+        CONFIG.lowMemory ? '--window-size=1024,700' : '--window-size=1366,900',
       ],
-      defaultViewport: { width: 1366, height: 900 },
+      defaultViewport: CONFIG.lowMemory ? { width: 1024, height: 700 } : { width: 1366, height: 900 },
     });
   })();
   try {
@@ -583,6 +626,9 @@ function mutex() {
   };
 }
 
+// Lightest first. /explore is TikTok's full web app and always has the security script.
+const HOME_CANDIDATES = ['https://www.tiktok.com/legal/page/global/terms-of-service/en', 'https://www.tiktok.com/explore'];
+
 class TikTokAccount {
   constructor(session, cookies) {
     this.session = session;
@@ -599,38 +645,91 @@ class TikTokAccount {
     this.ready = false;
   }
 
-  async newPage() {
+  async newPage({ light = false } = {}) {
     const page = await this.context.newPage();
     page.setDefaultNavigationTimeout(CONFIG.browser.navTimeoutMs);
     await page.setUserAgent(UA);
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
     await page.setRequestInterception(true);
     page.on('request', (r) => {
       if (r.isInterceptResolutionHandled()) return;
       const t = r.resourceType();
-      if (t === 'image' || t === 'media' || t === 'font') r.abort().catch(() => {});
+      const skip =
+        t === 'image' || t === 'media' || t === 'font' || t === 'manifest' || t === 'texttrack' ||
+        (light && t === 'stylesheet') ||
+        /\.(mp4|webm|m3u8|jpe?g|png|webp|gif|woff2?)(\?|$)/i.test(r.url()) ||
+        /google-analytics|googletagmanager|doubleclick|facebook\.net|analytics\.tiktok\.com|ads\.tiktok\.com/i.test(r.url());
+      if (skip) r.abort().catch(() => {});
       else r.continue().catch(() => {});
     });
     return page;
   }
 
+  /**
+   * Opens a tiktok.com page so TikTok's own security script is running in the tab (it signs the
+   * block requests). Lighter pages are tried first; the first one that has the script is remembered.
+   */
   async loadHome(page) {
-    await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 15000 }).catch(() => {});
-    await delay(600);
+    const remembered = templates.data.__home;
+    const skip = new Set(templates.data.__noScript || []);
+    const candidates = [...new Set([remembered, ...HOME_CANDIDATES].filter((u) => u && !skip.has(u)))];
+    for (const url of candidates) {
+      await this.gotoWithRetry(page, url);
+      await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 20000 }).catch(() => {});
+      const signed = await page
+        .waitForFunction(() => !/\[native code\]/.test(XMLHttpRequest.prototype.open.toString()), { timeout: 20000, polling: 500 })
+        .then(() => true)
+        .catch(() => false);
+      if (signed || url === candidates[candidates.length - 1]) {
+        if (signed && templates.data.__home !== url) {
+          templates.data.__home = url;
+          templates.save();
+        }
+        await delay(500);
+        return;
+      }
+      log.info(`TikTok's security script didn't load on ${url}; trying a fuller page.`);
+      templates.data.__noScript = [...skip, url];
+      templates.save();
+    }
+  }
+
+  async gotoWithRetry(page, url) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+        break;
+      } catch (e) {
+        if (attempt < 2 && /timeout/i.test(e.message)) continue;
+        if (/timeout/i.test(e.message)) {
+          throw new EngineError(
+            'slow',
+            `TikTok took more than ${Math.round(CONFIG.browser.navTimeoutMs / 1000)}s to load on the server. Try again — the first load after a restart is the slowest. If it keeps happening, raise NAV_TIMEOUT_MS (e.g. 180000).`
+          );
+        }
+        throw e;
+      }
+    }
   }
 
   async open() {
+    lastBrowserUse = Date.now();
     const browser = await getBrowser();
-    this.context = await browser.createBrowserContext();
+    if (CONFIG.lowMemory) {
+      this.context = browser.defaultBrowserContext();
+      this.sharedContext = true;
+      try {
+        const old = await this.context.cookies();
+        if (old.length) await this.context.deleteCookie(...old);
+      } catch {}
+    } else {
+      this.context = await browser.createBrowserContext();
+    }
     await this.context.setCookie(
       ...this.cookies.map((c) => ({ name: c.name, value: c.value, domain: '.tiktok.com', path: '/', secure: true, sameSite: 'None' }))
     );
 
-    const page = await this.newPage();
+    const page = await this.newPage({ light: true });
     await this.loadHome(page);
     if (await hasCaptcha(page)) {
       throw new EngineError('captcha', 'TikTok showed a captcha to the server. Wait a few minutes, or run the server from a home connection.');
@@ -656,7 +755,7 @@ class TikTokAccount {
 
   async ensureApiPage() {
     if (this.apiPage && !this.apiPage.isClosed()) return this.apiPage;
-    this.apiPage = await this.newPage();
+    this.apiPage = await this.newPage({ light: true });
     await this.loadHome(this.apiPage);
     return this.apiPage;
   }
@@ -687,12 +786,19 @@ class TikTokAccount {
   async close() {
     this.ready = false;
     const ctx = this.context;
+    const pages = [this.apiPage, ...this.uiPages].filter(Boolean);
     this.context = null;
     this.apiPage = null;
     this.uiPages = [];
     this.uiFree = [];
     this.uiWaiters.splice(0).forEach((w) => w(null));
-    if (ctx) await ctx.close().catch(() => {});
+    if (ctx && this.sharedContext) {
+      for (const p of pages) await p.close().catch(() => {});
+      try {
+        const old = await ctx.cookies();
+        if (old.length) await ctx.deleteCookie(...old);
+      } catch {}
+    } else if (ctx) await ctx.close().catch(() => {});
   }
 
   get template() {
@@ -808,6 +914,7 @@ class TikTokAccount {
   }
 
   async block(handle) {
+    lastBrowserUse = Date.now();
     const ids = await this.resolveIds(handle);
     if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
 
@@ -874,7 +981,10 @@ class ClientSession {
       autoBlockSharers: a.autoBlockSharers,
       autoBlockThreshold: a.autoBlockThreshold,
       engineError: a.engineError,
-      fastMode: Boolean(this.account?.fastHealthy),
+      fastMode: Boolean(
+        this.account?.fastHealthy ||
+          (this.lastUid && templates.data[this.lastUid] && templates.data[this.lastUid].failures < CONFIG.block.apiFailuresBeforeUi)
+      ),
     };
   }
 
@@ -907,6 +1017,7 @@ class ClientSession {
       try {
         const me = await acc.open();
         this.account = acc;
+        this.lastUid = me.uid;
         Object.assign(this.auth, { loggedIn: true, accountName: me.uniqueId || '', nickname: me.nickname || '', avatar: me.avatar || '', engineError: null });
         return acc;
       } catch (err) {
@@ -987,7 +1098,7 @@ function createJob(session, handles, kind = 'manual') {
   session.jobs.set(job.id, job);
   if (session.jobs.size > 50) session.jobs.delete(session.jobs.keys().next().value);
 
-  const uid = session.account?.me?.uid;
+  const uid = session.account?.me?.uid || session.lastUid;
   for (const h of handles) {
     if (isInLedger(uid, h)) {
       job.processed++;
@@ -1256,6 +1367,14 @@ app.post(
     if (!cookies.some((c) => /^(sessionid|sessionid_ss|sid_tt)$/i.test(c.name))) {
       return res.status(400).json({ error: 'That cookie has no sessionid in it. Paste the full Cookie header from tiktok.com.' });
     }
+    if (CONFIG.lowMemory) {
+      const other = [...sessions.values()].find((x) => x !== s && x.cookies);
+      if (other) {
+        return res.status(409).json({
+          error: `This server runs in low-memory mode, which fits one TikTok account at a time. @${other.auth.accountName || 'another account'} is already connected in another session. Disconnect it there first.`,
+        });
+      }
+    }
     s.cookies = cookies;
     if (s.account) {
       await s.account.close();
@@ -1445,6 +1564,33 @@ app.use((err, req, res, _next) => {
   log.error('500:', err?.stack || err);
   res.status(500).json({ error: err?.message || 'Server error' });
 });
+
+// Low-memory mode: shut the browser down when nothing needs it. Accounts keep their cookies and
+// reopen automatically on the next block. It stays open while a LIVE with auto-block is running.
+setInterval(async () => {
+  if (!CONFIG.lowMemory || !browserPromise) return;
+  const busy = [...sessions.values()].some(
+    (s) => s.queue.length || s.workers || s.opening || (s.state.connected && s.auth.autoBlockSharers && s.cookies)
+  );
+  if (busy) {
+    lastBrowserUse = Date.now();
+    return;
+  }
+  if (Date.now() - lastBrowserUse < CONFIG.browser.idleCloseMs) return;
+  const b = await browserPromise.catch(() => null);
+  browserPromise = null;
+  for (const s of sessions.values()) {
+    if (s.account) {
+      s.account.ready = false;
+      s.account = null;
+    }
+  }
+  if (b) {
+    log.info('No blocks for a while — closing the browser to free memory.');
+    await b.close().catch(() => {});
+  }
+  setEngineStatus('idle', '', 0);
+}, 20000).unref();
 
 // Close idle browser contexts so Chrome doesn't hold memory for absent users.
 setInterval(() => {
