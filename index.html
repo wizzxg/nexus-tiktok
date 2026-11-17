@@ -329,12 +329,13 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
       <div><b id="acct-name"></b><span id="acct-sub"></span></div>
     </div>
     <ol class="steps">
-      <li>Open tiktok.com in any browser (Opera GX, Chrome, Edge, Brave…) and log in.</li>
-      <li>Press Ctrl+Shift+I, open the Application tab, then Cookies, then https://www.tiktok.com.</li>
-      <li>Copy the value of <code>sessionid</code> (or paste the whole Cookie header).</li>
+      <li>Open tiktok.com in Opera GX (or any browser) and make sure you're logged in.</li>
+      <li>Press Ctrl+Shift+I, open the <b>Network</b> tab, then press F5 to reload the page.</li>
+      <li>Click the first request named <code>www.tiktok.com</code>, find <b>Request Headers</b>, right-click the <code>cookie</code> line and choose Copy value.</li>
+      <li>Paste it below. Copying only <code>sessionid</code> sometimes isn't enough.</li>
     </ol>
-    <label class="field-label" for="tt-cookie-input">Cookie or sessionid</label>
-    <input type="password" id="tt-cookie-input" class="modal-input" placeholder="Paste full Cookie header or sessionid…" autocomplete="off">
+    <label class="field-label" for="tt-cookie-input">Cookie string</label>
+    <input type="password" id="tt-cookie-input" class="modal-input" placeholder="Paste the whole cookie string…" autocomplete="off">
     <div class="form-msg info" id="acct-engine" hidden></div>
     <div class="form-msg err" id="acct-err" hidden></div>
     <div class="modal-actions">
