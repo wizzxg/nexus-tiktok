@@ -14,7 +14,7 @@ require('events').EventEmitter.defaultMaxListeners = 250;
 const CONFIG = {
   port: Number(process.env.PORT) || 3000,
   ttBlacklistPath: process.env.TT_BLACKLIST_PATH || path.join(__dirname, 'tiktok_blacklist.txt'),
-  ttProfilesPath: process.env.TT_PROFILES_PATH || path.join(__dirname, 'tiktok_profiles_cache.json'),
+  ttProfilesPath: process.env.TT_PROFILES_PATH || path.join(__dirname, 'tiktok_profiles_v3.json'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   eulerApiKey: process.env.EULER_API_KEY || null,
   tiktok: {
@@ -23,8 +23,7 @@ const CONFIG = {
     maxBlockRetries: 3,
     blockConcurrency: 2,
     blockStaggerMs: 380,
-    tikwmMinIntervalMs: 1150,
-    profileCacheTtlMs: 7 * 24 * 60 * 60 * 1000,
+    tikwmMinIntervalMs: 1100,
     shareDedupWindowMs: 1200,
   },
 };
@@ -71,6 +70,7 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: true,
 });
 
+// Preserves 64-bit integers as strings before JSON.parse so TikTok IDs never lose precision
 const tiktokHttp = axios.create({
   httpsAgent,
   timeout: CONFIG.tiktok.resolveTimeoutMs,
@@ -79,6 +79,25 @@ const tiktokHttp = axios.create({
     Accept: 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
   },
+  transformResponse: [
+    (data) => {
+      if (typeof data === 'string') {
+        const trimmed = data.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          const safeJson = data.replace(
+            /("(?:id|user_id|userId|uid|target_uid)"\s*:\s*)(\d{15,})/g,
+            '$1"$2"'
+          );
+          try {
+            return JSON.parse(safeJson);
+          } catch (e) {
+            return data;
+          }
+        }
+      }
+      return data;
+    },
+  ],
   validateStatus: () => true,
 });
 
@@ -88,11 +107,14 @@ function toNumericIdString(val) {
     const t = val.trim();
     return /^\d+$/.test(t) && t !== '0' ? t : '';
   }
-  if (typeof val === 'number') {
-    return Number.isFinite(val) && val > 0 ? String(Math.trunc(val)) : '';
-  }
   if (typeof val === 'bigint') {
     return val > 0n ? val.toString() : '';
+  }
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val) || val <= 0) return '';
+    // Reject float64 numbers that have lost 64-bit integer precision
+    if (!Number.isSafeInteger(val)) return '';
+    return String(Math.trunc(val));
   }
   if (typeof val === 'object') {
     if (typeof val.low === 'number' && typeof val.high === 'number') {
@@ -111,6 +133,10 @@ function toNumericIdString(val) {
   return '';
 }
 
+function isValidSecUid(sec) {
+  return typeof sec === 'string' && sec.trim().startsWith('MS4wLjAB') && sec.trim().length > 20;
+}
+
 function normalizeTikTokHandle(raw) {
   return String(raw ? raw : '')
     .trim()
@@ -118,10 +144,6 @@ function normalizeTikTokHandle(raw) {
     .trim();
 }
 
-/**
- * Safely parses any string or array into clean TikTok usernames (min 2 chars).
- * Never iterates character-by-character over a string.
- */
 function parseUsernameList(input) {
   const rawItems = Array.isArray(input) ? input : [String(input ? input : '')];
   const out = [];
@@ -141,7 +163,7 @@ function parseUsernameList(input) {
 }
 
 // ============================================================================
-// PERSISTENT PROFILE CACHE (SURVIVES RESTARTS)
+// PERSISTENT VERIFIED PROFILE CACHE
 // ============================================================================
 const tiktokProfileCache = new Map();
 
@@ -151,10 +173,12 @@ function loadProfileCacheFromDisk() {
     const raw = JSON.parse(fs.readFileSync(CONFIG.ttProfilesPath, 'utf8'));
     if (raw && typeof raw === 'object') {
       for (const [k, v] of Object.entries(raw)) {
-        if (v && (v.userId || v.secUid)) {
+        const uid = toNumericIdString(v?.userId);
+        const sec = String(v?.secUid ? v.secUid : '').trim();
+        if (uid && isValidSecUid(sec)) {
           tiktokProfileCache.set(k.toLowerCase(), {
-            userId: String(v.userId ? v.userId : ''),
-            secUid: String(v.secUid ? v.secUid : ''),
+            userId: uid,
+            secUid: sec,
             at: Number(v.at) || Date.now(),
           });
         }
@@ -170,7 +194,7 @@ function saveProfileCacheToDisk() {
     try {
       const obj = {};
       for (const [k, v] of tiktokProfileCache.entries()) {
-        if (v.userId || v.secUid) obj[k] = v;
+        if (v.userId && isValidSecUid(v.secUid)) obj[k] = v;
       }
       fsp.writeFile(CONFIG.ttProfilesPath, JSON.stringify(obj)).catch(() => {});
     } catch (e) {}
@@ -182,7 +206,7 @@ function cacheTikTokProfile(uniqueId, userId, secUid) {
   if (!key || key.length < 2) return;
   const prev = tiktokProfileCache.get(key) || {};
   const nextUid = toNumericIdString(userId) || prev.userId || '';
-  const nextSec = String(secUid ? secUid : prev.secUid ? prev.secUid : '').trim();
+  const nextSec = isValidSecUid(secUid) ? String(secUid).trim() : (prev.secUid || '');
   if (!nextUid && !nextSec) return;
 
   tiktokProfileCache.set(key, {
@@ -190,7 +214,9 @@ function cacheTikTokProfile(uniqueId, userId, secUid) {
     secUid: nextSec,
     at: Date.now(),
   });
-  saveProfileCacheToDisk();
+  if (nextUid && isValidSecUid(nextSec)) {
+    saveProfileCacheToDisk();
+  }
 }
 
 loadProfileCacheFromDisk();
@@ -328,7 +354,7 @@ function broadcastGlobalBlacklist() {
 }
 
 // ============================================================================
-// TIKTOK RESOLVERS & RATE-GATED TIKWM LOOKUP
+// TIKTOK RESOLVERS (TIKWM LAYER 1 + REHYDRATION LAYER 2 + APILIVE LAYER 3)
 // ============================================================================
 let tiktokLib = null;
 async function getTikTokLib() {
@@ -350,7 +376,6 @@ function singleFlight() {
 }
 const ttResolveFlight = singleFlight();
 
-// Paces tikwm.com calls to 1 request per 1.15s so tikwm never rate-limits
 let nextTikwmSlotAt = 0;
 async function acquireTikwmSlot() {
   const now = Date.now();
@@ -438,12 +463,14 @@ function extractShareUser(data) {
   const uniqueId = normalizeTikTokHandle(u.uniqueId || u.displayId || u.username || data?.uniqueId || '');
   const nickname = String(u.nickname || u.nickName || data?.nickname || uniqueId).trim();
   const userId =
+    toNumericIdString(u.idStr) ||
     toNumericIdString(u.userId) ||
     toNumericIdString(u.id) ||
-    toNumericIdString(u.idStr) ||
+    toNumericIdString(pieceUser?.idStr) ||
     toNumericIdString(pieceUser?.id) ||
     toNumericIdString(data?.userId);
-  const secUid = String(u.secUid || u.sec_uid || pieceUser?.secUid || data?.secUid || '').trim();
+  const rawSec = String(u.secUid || u.sec_uid || pieceUser?.secUid || data?.secUid || '').trim();
+  const secUid = isValidSecUid(rawSec) ? rawSec : '';
   const pfp =
     u.profilePictureUrl ||
     u.profilePicture?.urls?.[0] ||
@@ -457,14 +484,19 @@ async function resolveTikTokUserProfile(session, uniqueId) {
   const clean = normalizeTikTokHandle(uniqueId).toLowerCase();
   if (!clean || clean.length < 2) return { userId: '', secUid: '' };
 
+  // If the user input is already a raw 15-20 digit numeric TikTok User ID
+  if (/^\d{15,20}$/.test(clean)) {
+    return { userId: clean, secUid: '' };
+  }
+
   const cached = tiktokProfileCache.get(clean);
-  if (cached && /^\d+$/.test(cached.userId) && cached.secUid) {
+  if (cached && /^\d+$/.test(cached.userId) && isValidSecUid(cached.secUid)) {
     return { userId: cached.userId, secUid: cached.secUid };
   }
 
   if (session) {
     for (const [k, v] of session.sharers.entries()) {
-      if (k.toLowerCase() === clean && /^\d+$/.test(v.userId) && v.secUid) {
+      if (k.toLowerCase() === clean && /^\d+$/.test(v.userId) && isValidSecUid(v.secUid)) {
         cacheTikTokProfile(clean, v.userId, v.secUid);
         return { userId: v.userId, secUid: v.secUid };
       }
@@ -472,76 +504,12 @@ async function resolveTikTokUserProfile(session, uniqueId) {
   }
 
   return ttResolveFlight(`tt-resolve:${clean}`, async () => {
-    let foundUserId = cached?.userId || '';
-    let foundSecUid = cached?.secUid || '';
+    let foundUserId = '';
+    let foundSecUid = '';
 
-    // Layer 1: TikTok API-Live User Room (Fast, no rate-limit)
-    try {
-      const apiRes = await tiktokHttp.get(
-        `https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId=${encodeURIComponent(clean)}&sourceType=54`,
-        {
-          timeout: 5000,
-          headers: {
-            Referer: `https://www.tiktok.com/@${encodeURIComponent(clean)}/live`,
-            ...(session?.auth?.cookieHeader ? { Cookie: session.auth.cookieHeader } : {}),
-          },
-        }
-      );
-      const u = apiRes.data?.data?.user;
-      if (u) {
-        const uid = toNumericIdString(u.id || u.idStr);
-        const sec = String(u.secUid || '').trim();
-        if (uid) foundUserId = uid;
-        if (sec) foundSecUid = sec;
-        if (foundUserId && foundSecUid) {
-          cacheTikTokProfile(clean, foundUserId, foundSecUid);
-          return { userId: foundUserId, secUid: foundSecUid };
-        }
-      }
-    } catch (e) {}
-
-    // Layer 2: TikTok @username Profile Page HTML Parser (Fast, uses session cookie)
-    try {
-      const resHtml = await tiktokHttp.get(`https://www.tiktok.com/@${encodeURIComponent(clean)}`, {
-        timeout: 6000,
-        headers: {
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          ...(session?.auth?.cookieHeader ? { Cookie: session.auth.cookieHeader } : {}),
-        },
-      });
-      const html = typeof resHtml.data === 'string' ? resHtml.data : '';
-      const scriptMatch = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
-      if (scriptMatch && scriptMatch[1]) {
-        try {
-          const jsonData = JSON.parse(scriptMatch[1]);
-          const userDetail = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo?.user;
-          if (userDetail) {
-            const uid = toNumericIdString(userDetail.id);
-            const sec = String(userDetail.secUid || '').trim();
-            if (uid && !foundUserId) foundUserId = uid;
-            if (sec && !foundSecUid) foundSecUid = sec;
-          }
-        } catch (e) {}
-      }
-
-      if (!foundUserId || !foundSecUid) {
-        const escapedClean = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const r1 = new RegExp(`"id"\\s*:\\s*"(\\d+)"[^}]{0,350}"uniqueId"\\s*:\\s*"${escapedClean}"[^}]{0,650}"secUid"\\s*:\\s*"([^"]+)"`, 'i');
-        const r2 = new RegExp(`"uniqueId"\\s*:\\s*"${escapedClean}"[^}]{0,450}"id"\\s*:\\s*"(\\d+)"[^}]{0,450}"secUid"\\s*:\\s*"([^"]+)"`, 'i');
-        const m = r1.exec(html) || r2.exec(html);
-        if (m) {
-          if (!foundUserId) foundUserId = m[1];
-          if (!foundSecUid) foundSecUid = m[2];
-        }
-      }
-
-      if (foundUserId && foundSecUid) {
-        cacheTikTokProfile(clean, foundUserId, foundSecUid);
-        return { userId: foundUserId, secUid: foundSecUid };
-      }
-    } catch (e) {}
-
-    // Layer 3: Rate-Gated TikWM Public API (1 req / 1.15s with auto-retry on rate-limit)
+    // ------------------------------------------------------------------------
+    // LAYER 1: TikWM Public API (Most Reliable for ALL TikTok Users)
+    // ------------------------------------------------------------------------
     for (let twTry = 1; twTry <= 3; twTry++) {
       try {
         await acquireTikwmSlot();
@@ -550,22 +518,79 @@ async function resolveTikTokUserProfile(session, uniqueId) {
           { timeout: 6500, headers: { Accept: 'application/json' } }
         );
         if (twRes.data?.code === -1) {
-          // TikWM rate-limit hit; wait and retry
-          await delay(1200 * twTry);
+          await delay(1100 * twTry);
           continue;
         }
         const u = twRes.data?.data?.user;
         if (u) {
           const uid = toNumericIdString(u.id);
-          const sec = String(u.secUid || '').trim();
+          const sec = String(u.secUid ? u.secUid : '').trim();
           if (uid) foundUserId = uid;
-          if (sec) foundSecUid = sec;
+          if (isValidSecUid(sec)) foundSecUid = sec;
+          if (foundUserId && foundSecUid) {
+            log.info(`[TikTok Resolve L1 TikWM] @${clean} -> uid=${foundUserId}, sec=yes`);
+            cacheTikTokProfile(clean, foundUserId, foundSecUid);
+            return { userId: foundUserId, secUid: foundSecUid };
+          }
         }
         break;
       } catch (e) {}
     }
 
-    if (foundUserId || foundSecUid) {
+    // ------------------------------------------------------------------------
+    // LAYER 2: TikTok @username Rehydration JSON (NO session cookie so it never
+    //          contaminates the page with your own logged-in user ID)
+    // ------------------------------------------------------------------------
+    try {
+      const resHtml = await tiktokHttp.get(`https://www.tiktok.com/@${encodeURIComponent(clean)}`, {
+        timeout: 6000,
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      });
+      const html = typeof resHtml.data === 'string' ? resHtml.data : '';
+      const scriptMatch = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
+      if (scriptMatch && scriptMatch[1]) {
+        const jsonData = JSON.parse(scriptMatch[1]);
+        const userDetail = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo?.user;
+        if (userDetail && String(userDetail.uniqueId || '').toLowerCase() === clean) {
+          const uid = toNumericIdString(userDetail.idStr || userDetail.id);
+          const sec = String(userDetail.secUid || '').trim();
+          if (uid && !foundUserId) foundUserId = uid;
+          if (isValidSecUid(sec) && !foundSecUid) foundSecUid = sec;
+          if (foundUserId && foundSecUid) {
+            log.info(`[TikTok Resolve L2 Web] @${clean} -> uid=${foundUserId}, sec=yes`);
+            cacheTikTokProfile(clean, foundUserId, foundSecUid);
+            return { userId: foundUserId, secUid: foundSecUid };
+          }
+        }
+      }
+    } catch (e) {}
+
+    // ------------------------------------------------------------------------
+    // LAYER 3: TikTok API-Live User Room (Uses idStr first, verifies uniqueId)
+    // ------------------------------------------------------------------------
+    try {
+      const apiRes = await tiktokHttp.get(
+        `https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId=${encodeURIComponent(clean)}&sourceType=54`,
+        {
+          timeout: 5000,
+          headers: {
+            Referer: `https://www.tiktok.com/@${encodeURIComponent(clean)}/live`,
+          },
+        }
+      );
+      const u = apiRes.data?.data?.user;
+      if (u && String(u.uniqueId || '').toLowerCase() === clean) {
+        const uid = toNumericIdString(u.idStr || u.id);
+        const sec = String(u.secUid || '').trim();
+        if (uid && !foundUserId) foundUserId = uid;
+        if (isValidSecUid(sec) && !foundSecUid) foundSecUid = sec;
+      }
+    } catch (e) {}
+
+    if (foundUserId && foundSecUid) {
+      log.info(`[TikTok Resolve L3] @${clean} -> uid=${foundUserId}, sec=yes`);
       cacheTikTokProfile(clean, foundUserId, foundSecUid);
     }
     return { userId: foundUserId, secUid: foundSecUid };
@@ -590,7 +615,7 @@ async function signTikTokUrlIfPossible(targetUrl) {
 }
 
 // ============================================================================
-// CORE BLOCKING ENGINE (PROVEN V1 WEB + MOBILE AWEME FALLBACK)
+// CORE BLOCKING ENGINE
 // ============================================================================
 
 async function blockTikTokUserOnAccount(session, userObj) {
@@ -606,12 +631,13 @@ async function blockTikTokUserOnAccount(session, userObj) {
   }
 
   let targetUserId = toNumericIdString(userObj?.userId);
-  let targetSecUid = String(userObj?.secUid || '').trim();
+  let targetSecUid = isValidSecUid(userObj?.secUid) ? String(userObj.secUid).trim() : '';
 
-  if (!targetUserId || !targetSecUid) {
+  // Always resolve if we don't have a verified secUid
+  if (!targetSecUid || !targetUserId) {
     const resolved = await resolveTikTokUserProfile(session, cleanUsername);
-    if (!targetUserId && resolved.userId) targetUserId = resolved.userId;
-    if (!targetSecUid && resolved.secUid) targetSecUid = resolved.secUid;
+    if (resolved.userId) targetUserId = resolved.userId;
+    if (isValidSecUid(resolved.secUid)) targetSecUid = resolved.secUid;
   }
 
   if (!targetSecUid && !targetUserId) {
@@ -620,10 +646,10 @@ async function blockTikTokUserOnAccount(session, userObj) {
       userId: '—',
       success: false,
       vector: 'RESOLVE_MISS',
-      note: `Could not resolve @${cleanUsername}`,
+      note: `User @${cleanUsername} not found on TikTok`,
       elapsedMs: Date.now() - startMs,
     });
-    return { blockedOnTikTok: false, note: `Could not resolve @${cleanUsername}` };
+    return { blockedOnTikTok: false, note: `User @${cleanUsername} not found` };
   }
 
   const csrfToken = session.auth.csrfToken || crypto.randomBytes(16).toString('hex');
@@ -640,7 +666,11 @@ async function blockTikTokUserOnAccount(session, userObj) {
   };
 
   let lastNote = '';
+
   for (let attempt = 1; attempt <= CONFIG.tiktok.maxBlockRetries; attempt++) {
+    // On Attempt 2, if Attempt 1 said "User ID Invalid", send ONLY secUid (omitting numeric userId)
+    const useSecOnly = attempt === 2 && Boolean(targetSecUid);
+
     try {
       const webQuery = new URLSearchParams({
         WebIdLastTime: String(Math.floor(Date.now() / 1000)),
@@ -675,7 +705,7 @@ async function blockTikTokUserOnAccount(session, userObj) {
         ...(targetSecUid
           ? { secUid: targetSecUid, sec_user_id: targetSecUid, target_sec_uid: targetSecUid }
           : {}),
-        ...(targetUserId
+        ...(!useSecOnly && targetUserId
           ? { userId: targetUserId, user_id: targetUserId, target_uid: targetUserId }
           : {}),
         ...(session.auth.msToken ? { msToken: session.auth.msToken } : {}),
@@ -686,7 +716,7 @@ async function blockTikTokUserOnAccount(session, userObj) {
         block_type: '1',
         source: '0',
         ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid } : {}),
-        ...(targetUserId ? { userId: targetUserId, user_id: targetUserId } : {}),
+        ...(!useSecOnly && targetUserId ? { userId: targetUserId, user_id: targetUserId } : {}),
       });
 
       const unsignedUrl = `https://www.tiktok.com/api/user/block/?${webQuery.toString()}`;
@@ -698,7 +728,7 @@ async function blockTikTokUserOnAccount(session, userObj) {
       });
 
       log.info(
-        `[TikTok Block V1 Web] @${cleanUsername} (uid=${targetUserId}, sec=${targetSecUid ? 'yes' : 'no'}) -> HTTP ${res1.status}:`,
+        `[TikTok Block V1 Web] @${cleanUsername} (try=${attempt}, uid=${useSecOnly ? 'sec-only' : targetUserId}, sec=${targetSecUid ? 'yes' : 'no'}) -> HTTP ${res1.status}:`,
         JSON.stringify(res1.data || {}).slice(0, 180)
       );
 
@@ -711,7 +741,7 @@ async function blockTikTokUserOnAccount(session, userObj) {
       ) {
         session.recordDiagnostic({
           username: cleanUsername,
-          userId: targetUserId,
+          userId: targetUserId || 'secUid',
           success: true,
           vector: `WEB_V1_TRY_${attempt}`,
           elapsedMs: Date.now() - startMs,
@@ -720,11 +750,12 @@ async function blockTikTokUserOnAccount(session, userObj) {
       }
 
       lastNote = res1.data?.status_msg || `code ${res1.data?.status_code ?? res1.status}`;
-      if (String(lastNote).toLowerCase().includes('invalid') || String(lastNote).toLowerCase().includes('param')) {
+
+      if (attempt === 2 && (String(lastNote).toLowerCase().includes('invalid') || !targetSecUid)) {
         tiktokProfileCache.delete(cleanUsername.toLowerCase());
         const fresh = await resolveTikTokUserProfile(session, cleanUsername);
         if (fresh.userId) targetUserId = fresh.userId;
-        if (fresh.secUid) targetSecUid = fresh.secUid;
+        if (isValidSecUid(fresh.secUid)) targetSecUid = fresh.secUid;
       }
     } catch (err) {
       lastNote = err.message;
@@ -735,10 +766,10 @@ async function blockTikTokUserOnAccount(session, userObj) {
 
   session.recordDiagnostic({
     username: cleanUsername,
-    userId: targetUserId,
+    userId: targetUserId || '—',
     success: false,
     vector: 'FAILED',
-    note: lastNote,
+    note: `${lastNote} [uid:${targetUserId || 'none'} sec:${targetSecUid ? 'yes' : 'no'}]`,
     elapsedMs: Date.now() - startMs,
   });
   return { blockedOnTikTok: false, note: lastNote };
@@ -793,7 +824,7 @@ function recordTikTokSharer(session, data) {
   const parsed = extractShareUser(data);
   if (!parsed.uniqueId || parsed.uniqueId.length < 2) return;
 
-  if (parsed.userId || parsed.secUid) {
+  if (parsed.userId && isValidSecUid(parsed.secUid)) {
     cacheTikTokProfile(parsed.uniqueId, parsed.userId, parsed.secUid);
   }
 
@@ -823,11 +854,11 @@ function recordTikTokSharer(session, data) {
     if (session.auth.loggedIn) {
       blockTikTokUserOnAccount(session, userEntry).catch(() => {});
     }
-  } else if (!userEntry.secUid || !userEntry.userId) {
+  } else if (!isValidSecUid(userEntry.secUid) || !userEntry.userId) {
     resolveTikTokUserProfile(session, parsed.uniqueId)
       .then((resolved) => {
         if (resolved.userId && !userEntry.userId) userEntry.userId = resolved.userId;
-        if (resolved.secUid && !userEntry.secUid) userEntry.secUid = resolved.secUid;
+        if (isValidSecUid(resolved.secUid) && !userEntry.secUid) userEntry.secUid = resolved.secUid;
       })
       .catch(() => {});
   }
