@@ -438,7 +438,7 @@ function parseCookieInput(raw) {
     const i = part.indexOf('=');
     if (i <= 0) continue;
     const name = part.slice(0, i).trim();
-    const value = part.slice(i + 1).trim();
+    const value = part.slice(i + 1).trim().replace(/^"(.*)"$/, '$1');
     if (/^[\w.\-]+$/.test(name) && value) out.push({ name, value });
   }
   return out;
@@ -712,6 +712,69 @@ class TikTokAccount {
     }
   }
 
+  /**
+   * Works out which account the cookie belongs to. Checks several places because TikTok moves
+   * this around: the page's own data, the account-info endpoint, and the profile link in the menu.
+   * Returns { info } or { info: null, report } where report says what TikTok actually showed.
+   */
+  async detectLogin(page) {
+    const set = await this.context.cookies('https://www.tiktok.com').catch(() => []);
+    const hasSession = set.some((c) => /^(sessionid|sessionid_ss|sid_tt)$/.test(c.name));
+    if (!hasSession) return { info: null, report: 'The browser refused the cookie value, so check you copied the whole sessionid with nothing extra.' };
+
+    // 1) page data
+    const scope = await readScope(page);
+    const ctxUser = scope?.['webapp.app-context']?.user;
+    if (ctxUser?.uid) {
+      return { info: { uid: String(ctxUser.uid), uniqueId: ctxUser.uniqueId, nickname: ctxUser.nickName, avatar: ctxUser.avatarUri?.[0] || '' } };
+    }
+
+    // 2) account-info endpoint (two common forms)
+    let passportNote = '';
+    for (const url of [
+      'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_name=tiktok_web&device_platform=web_pc',
+      'https://www.tiktok.com/passport/web/user/info/?aid=1459&app_name=tiktok_web',
+    ]) {
+      const r = await pageXhr(page, { url }).catch(() => null);
+      const j = safeJson(r?.text);
+      const d = j?.data;
+      if (d && (d.user_id_str || d.user_id) && !d.error_code) {
+        return { info: { uid: String(d.user_id_str || d.user_id), uniqueId: d.username || d.unique_id || '', nickname: d.screen_name || d.name || '', avatar: d.avatar_url || '' } };
+      }
+      if (!passportNote) {
+        passportNote = j
+          ? `TikTok's account check said: "${d?.description || j.message || d?.error_code || 'no account'}".`
+          : `TikTok's account check gave ${r?.status ? `HTTP ${r.status}` : 'no answer'}${r?.text ? '' : ' (empty reply)'}.`;
+      }
+    }
+
+    // 3) the profile link in TikTok's menu
+    await page
+      .waitForSelector('[data-e2e="profile-icon"], [data-e2e="nav-profile"], [data-e2e="top-login-button"], [data-e2e="nav-login-button"]', { timeout: 12000 })
+      .catch(() => {});
+    const dom = await page
+      .evaluate(() => {
+        const prof = document.querySelector('a[data-e2e="nav-profile"], [data-e2e="profile-icon"]');
+        const link = prof?.closest('a')?.getAttribute('href') || prof?.getAttribute('href') || '';
+        const loginBtn = !!document.querySelector('[data-e2e="top-login-button"], [data-e2e="nav-login-button"]');
+        return { link, loginBtn, title: document.title, url: location.href };
+      })
+      .catch(() => ({ link: '', loginBtn: false, title: '', url: '' }));
+    const handle = /\/@([^/?#]+)/.exec(dom.link)?.[1];
+    if (handle) {
+      // Logged in but TikTok hid the numeric ID; a stable stand-in keeps per-account data apart.
+      const sid = set.find((c) => c.name === 'sessionid' || c.name === 'sessionid_ss')?.value || '';
+      const uid = 'h' + crypto.createHash('sha256').update(sid).digest('hex').slice(0, 15);
+      return { info: { uid, uniqueId: decodeURIComponent(handle), nickname: '', avatar: '' } };
+    }
+
+    const parts = [passportNote];
+    if (dom.loginBtn) parts.push('The page showed a "Log in" button.');
+    if (!scope) parts.push(`The page didn't load TikTok's data (title: "${dom.title || 'blank'}").`);
+    parts.push('Paste the whole cookie string instead of only sessionid (see the steps above). If it still fails, the session may be tied to your region; try a Render region closer to you, like Frankfurt.');
+    return { info: null, report: parts.filter(Boolean).join(' ') };
+  }
+
   async open() {
     lastBrowserUse = Date.now();
     const browser = await getBrowser();
@@ -735,16 +798,11 @@ class TikTokAccount {
       throw new EngineError('captcha', 'TikTok showed a captcha to the server. Wait a few minutes, or run the server from a home connection.');
     }
 
-    const me = (await readScope(page))?.['webapp.app-context']?.user;
-    let info = me?.uid ? { uid: String(me.uid), uniqueId: me.uniqueId, nickname: me.nickName, avatar: me.avatarUri?.[0] || '' } : null;
+    const { info, report } = await this.detectLogin(page);
     if (!info) {
-      const r = await pageXhr(page, { url: 'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_name=tiktok_web' });
-      const d = safeJson(r.text)?.data;
-      if (d && (d.user_id_str || d.user_id)) {
-        info = { uid: String(d.user_id_str || d.user_id), uniqueId: d.username, nickname: d.screen_name, avatar: d.avatar_url || '' };
-      }
+      log.warn(`[${this.session.username}] Login check failed: ${report}`);
+      throw new EngineError('not_logged_in', `TikTok treated the server as logged out. ${report}`);
     }
-    if (!info) throw new EngineError('not_logged_in', 'TikTok did not accept this cookie. Copy a fresh one while logged in on tiktok.com.');
 
     this.me = info;
     this.apiPage = page;
