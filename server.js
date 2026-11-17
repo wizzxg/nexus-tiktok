@@ -11,8 +11,6 @@
  */
 
 const path = require('path');
-// Keep Chrome inside the project folder (hosts like Render drop ~/.cache between build and run).
-process.env.PUPPETEER_CACHE_DIR ||= path.join(__dirname, '.cache', 'puppeteer');
 
 const express = require('express');
 const crypto = require('crypto');
@@ -33,7 +31,6 @@ const CONFIG = {
   },
   browser: {
     headless: process.env.HEADFUL !== '1',
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || undefined,
     navTimeoutMs: 30000,
   },
   block: {
@@ -190,9 +187,140 @@ function addToLedger(uid, h) {
 // ============================================================================
 // HEADLESS BROWSER ENGINE
 // ============================================================================
+// The server needs a Chromium-based browser on the machine it runs on (not the browser you
+// use to open the dashboard). It looks for one in this order:
+//   1. PUPPETEER_EXECUTABLE_PATH / CHROME_PATH env var
+//   2. a Chrome that Puppeteer already downloaded
+//   3. Chrome, Edge, Brave or Chromium installed on the machine
+//   4. otherwise it downloads its own Chrome into ./.cache (first start only)
 let puppeteer = null;
 let browserPromise = null;
 let browserError = null;
+let browserPath = null;
+let browserSetup = null;
+const engineStatus = { state: 'idle', progress: 0, message: '' };
+
+const BROWSER_CACHE = path.join(__dirname, '.cache', 'puppeteer');
+const loadPuppeteer = () => (puppeteer ||= require('puppeteer'));
+const loadBrowsers = () => require(require.resolve('@puppeteer/browsers', { paths: [path.dirname(require.resolve('puppeteer'))] }));
+
+function setEngineStatus(state, message = '', progress = engineStatus.progress) {
+  const changed = state !== engineStatus.state || message !== engineStatus.message || Math.abs(progress - engineStatus.progress) >= 5;
+  Object.assign(engineStatus, { state, message, progress });
+  if (!changed) return;
+  for (const s of sessions.values()) s.broadcast({ type: 'ENGINE', engine: { ...engineStatus } });
+}
+
+function systemBrowserPaths() {
+  const env = process.env;
+  if (process.platform === 'win32') {
+    const roots = [env.PROGRAMFILES || 'C:\\Program Files', env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', env.LOCALAPPDATA || ''];
+    const rel = [
+      'Google\\Chrome\\Application\\chrome.exe',
+      'Microsoft\\Edge\\Application\\msedge.exe',
+      'BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      'Chromium\\Application\\chrome.exe',
+    ];
+    return rel.flatMap((r) => roots.filter(Boolean).map((root) => path.join(root, r)));
+  }
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ];
+  }
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/microsoft-edge-stable',
+    '/usr/bin/brave-browser',
+  ];
+}
+
+async function findDownloadedChrome() {
+  const { getInstalledBrowsers } = loadBrowsers();
+  const dirs = [
+    process.env.PUPPETEER_CACHE_DIR,
+    BROWSER_CACHE,
+    path.join(path.dirname(require.resolve('puppeteer')), '..', '.cache', 'puppeteer'),
+    path.join(require('os').homedir(), '.cache', 'puppeteer'),
+  ].filter(Boolean);
+  for (const cacheDir of [...new Set(dirs)]) {
+    try {
+      const found = (await getInstalledBrowsers({ cacheDir })).filter((b) => b.browser === 'chrome' && fs.existsSync(b.executablePath));
+      found.sort((a, b) => String(b.buildId).localeCompare(String(a.buildId), undefined, { numeric: true }));
+      if (found[0]) return found[0].executablePath;
+    } catch {}
+  }
+  return null;
+}
+
+async function downloadChrome() {
+  const { install, Browser, detectBrowserPlatform } = loadBrowsers();
+  const buildId = loadPuppeteer().PUPPETEER_REVISIONS?.chrome || require('puppeteer-core').PUPPETEER_REVISIONS.chrome;
+  const platform = detectBrowserPlatform();
+  if (!platform) throw new Error(`Chrome can't be downloaded for this system (${process.platform}/${process.arch}). Install Chrome or Chromium on the server.`);
+  log.info(`No browser found on the server — downloading Chrome ${buildId} into .cache (first start only)…`);
+  setEngineStatus('downloading', 'Downloading Chrome for the server (first start only)…', 0);
+  const installed = await install({
+    browser: Browser.CHROME,
+    buildId,
+    platform,
+    cacheDir: BROWSER_CACHE,
+    downloadProgressCallback: (done, total) => {
+      if (total) setEngineStatus('downloading', 'Downloading Chrome for the server (first start only)…', Math.round((done / total) * 100));
+    },
+  });
+  log.info('Chrome downloaded.');
+  return installed.executablePath;
+}
+
+async function resolveBrowserPath() {
+  if (browserPath && fs.existsSync(browserPath)) return browserPath;
+  if (browserSetup) return browserSetup;
+  browserSetup = (async () => {
+    setEngineStatus('finding', 'Looking for a browser on the server…', 0);
+    const fromEnv = [process.env.PUPPETEER_EXECUTABLE_PATH, process.env.CHROME_PATH].find((p) => p && fs.existsSync(p));
+    const found =
+      fromEnv ||
+      (await findDownloadedChrome()) ||
+      systemBrowserPaths().find((p) => {
+        try {
+          return fs.existsSync(p);
+        } catch {
+          return false;
+        }
+      }) ||
+      (await downloadChrome());
+    browserPath = found;
+    log.info(`Using browser: ${found}`);
+    return found;
+  })();
+  try {
+    return await browserSetup;
+  } catch (e) {
+    setEngineStatus('error', e.message);
+    throw e;
+  } finally {
+    browserSetup = null;
+  }
+}
+
+function explainLaunchError(e) {
+  const msg = String(e?.message || e);
+  if (/error while loading shared libraries|libnss3|libatk|libgbm|libasound/i.test(msg)) {
+    return 'Chrome is missing system libraries on this server. On Linux run: sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libasound2';
+  }
+  if (/ENOSPC/i.test(msg)) return 'The server ran out of disk space while setting up Chrome.';
+  if (/ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|getaddrinfo/i.test(msg)) return "The server couldn't download Chrome (no internet access). Install Chrome or Chromium on the server and restart.";
+  return `The browser could not start on the server: ${msg.split('\n')[0]}`;
+}
 
 async function getBrowser() {
   if (browserPromise) {
@@ -200,37 +328,43 @@ async function getBrowser() {
     if (b && b.connected) return b;
     browserPromise = null;
   }
-  puppeteer ||= require('puppeteer');
-  browserPromise = puppeteer.launch({
-    headless: CONFIG.browser.headless,
-    executablePath: CONFIG.browser.executablePath,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--lang=en-US',
-      '--window-size=1366,900',
-    ],
-    defaultViewport: { width: 1366, height: 900 },
-  });
+  browserPromise = (async () => {
+    const executablePath = await resolveBrowserPath();
+    return loadPuppeteer().launch({
+      headless: CONFIG.browser.headless,
+      executablePath,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--lang=en-US',
+        '--window-size=1366,900',
+      ],
+      defaultViewport: { width: 1366, height: 900 },
+    });
+  })();
   try {
     const b = await browserPromise;
     browserError = null;
+    setEngineStatus('ready', '', 100);
     b.on('disconnected', () => {
-      log.warn('Chrome disconnected — sessions will reopen on next block.');
+      log.warn('Browser closed — it will reopen on the next block.');
       browserPromise = null;
       for (const s of sessions.values()) if (s.account) s.account.ready = false;
     });
-    log.info('Headless Chrome started.');
+    log.info('Headless browser started.');
     return b;
   } catch (e) {
     browserPromise = null;
-    browserError = e.message;
-    throw new EngineError(
-      'engine_unavailable',
-      `Chrome could not start on the server: ${e.message.split('\n')[0]}`
-    );
+    const friendly = explainLaunchError(e);
+    browserError = friendly;
+    if (browserPath && !/shared libraries|disk space/.test(friendly)) browserPath = null; // try another browser next time
+    setEngineStatus('error', friendly);
+    log.error(friendly);
+    throw new EngineError('engine_unavailable', friendly);
   }
 }
 
@@ -1064,7 +1198,8 @@ app.get('/api/health', (req, res) => {
     activeSessions: sessions.size,
     globalBlacklisted: blacklist.all().length,
     knownProfiles: Object.keys(profiles.data).length,
-    browser: browserPromise ? 'running' : browserError ? `error: ${browserError}` : 'idle',
+    browser: browserError ? `error: ${browserError}` : engineStatus.state,
+    browserPath,
   });
 });
 
@@ -1086,6 +1221,7 @@ function snapshot(s) {
     blacklist: blacklist.all(),
     jobs: [...s.jobs.values()].filter((j) => j.kind === 'manual').slice(-1).map(publicJob),
     attempts: s.attempts.slice(-60),
+    engine: { ...engineStatus },
   };
 }
 
@@ -1322,7 +1458,11 @@ setInterval(() => {
   }
 }, 60000).unref();
 
-const server = app.listen(CONFIG.port, () => log.info(`NEXUS listening on :${CONFIG.port}`));
+const server = app.listen(CONFIG.port, () => {
+  log.info(`NEXUS listening on :${CONFIG.port}`);
+  // Find (or download) the browser right away so connecting an account is quick.
+  resolveBrowserPath().catch((e) => log.error('Browser setup failed:', explainLaunchError(e)));
+});
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, async () => {
