@@ -13,6 +13,7 @@ require('events').EventEmitter.defaultMaxListeners = 250;
 
 const CONFIG = {
   port: Number(process.env.PORT) || 3000,
+  ttBlacklistPath: process.env.TT_BLACKLIST_PATH || path.join(__dirname, 'tiktok_blacklist.txt'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   eulerApiKey: process.env.EULER_API_KEY || null,
   tiktok: {
@@ -46,67 +47,6 @@ const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 const httpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 60000, maxSockets: 128, rejectUnauthorized: true });
 const tiktokHttp = axios.create({ httpsAgent, timeout: CONFIG.tiktok.resolveTimeoutMs, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36', Accept: 'application/json, text/plain, */*' }, validateStatus: () => true });
 
-const tiktokProfileCache = new Map();
-
-// ============================================================================
-// MULTI-TENANT SESSION MANAGER
-// ============================================================================
-class ClientSession {
-  constructor(clientId) {
-    this.clientId = clientId;
-    this.blacklistPath = path.join(__dirname, `blacklist_${clientId}.txt`);
-    this.auth = { loggedIn: false, cookieHeader: '', sessionId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '', accountName: '', autoBlockSharers: false };
-    this.state = { connected: false, username: null, roomId: null, error: null };
-    this.sharers = new Map();
-    this.blacklist = new Set();
-    this.connection = null;
-    this.jobs = new Map();
-    this.sseClients = new Set();
-    this.diagnosticHistory = [];
-    this.writeChain = Promise.resolve();
-
-    this.loadBlacklist();
-  }
-
-  broadcast(payload) {
-    const msg = `data: ${JSON.stringify(payload)}\n\n`;
-    for (const res of this.sseClients) {
-      try { res.write(msg); } catch (e) { this.sseClients.delete(res); }
-    }
-  }
-
-  recordDiagnostic(entry) {
-    const item = { id: crypto.randomUUID(), timestamp: new Date().toISOString(), ...entry };
-    this.diagnosticHistory.push(item);
-    if (this.diagnosticHistory.length > 250) this.diagnosticHistory.shift();
-    return item;
-  }
-
-  loadBlacklist() {
-    try {
-      if (!fs.existsSync(this.blacklistPath)) return fs.writeFileSync(this.blacklistPath, '');
-      for (const line of fs.readFileSync(this.blacklistPath, 'utf8').split(/\r?\n/)) {
-        const clean = normalizeTikTokHandle(line).toLowerCase();
-        if (clean) this.blacklist.add(clean);
-      }
-    } catch (e) {}
-  }
-
-  saveBlacklist() {
-    const content = Array.from(this.blacklist).join('\n') + (this.blacklist.size ? '\n' : '');
-    this.writeChain = this.writeChain.then(() => fsp.writeFile(this.blacklistPath, content)).catch(() => {});
-  }
-}
-
-const sessions = new Map();
-function getSession(clientId) {
-  if (!sessions.has(clientId)) sessions.set(clientId, new ClientSession(clientId));
-  return sessions.get(clientId);
-}
-
-// ============================================================================
-// UTILITIES
-// ============================================================================
 function toNumericIdString(val) {
   if (val == null) return '';
   if (typeof val === 'string') { const t = val.trim(); return /^\d+$/.test(t) && t !== '0' ? t : ''; }
@@ -122,6 +62,98 @@ function toNumericIdString(val) {
 
 function normalizeTikTokHandle(raw) { return String(raw || '').trim().replace(/^@+/, '').trim(); }
 
+// ============================================================================
+// GLOBAL BLACKLIST (SHARED ACROSS ALL USERS)
+// ============================================================================
+class TikTokBlacklist {
+  constructor(filePath) { this.filePath = filePath; this.usernames = new Set(); this.writeChain = Promise.resolve(); }
+  load() {
+    try {
+      if (!fs.existsSync(this.filePath)) return fs.writeFileSync(this.filePath, '');
+      for (const line of fs.readFileSync(this.filePath, 'utf8').split(/\r?\n/)) {
+        const clean = normalizeTikTokHandle(line).toLowerCase();
+        if (clean) this.usernames.add(clean);
+      }
+    } catch (e) {}
+  }
+  has(username) { return this.usernames.has(normalizeTikTokHandle(username).toLowerCase()); }
+  add(list) {
+    let added = 0;
+    for (const item of list) {
+      const clean = normalizeTikTokHandle(item).toLowerCase();
+      if (clean && !this.usernames.has(clean)) { this.usernames.add(clean); added++; }
+    }
+    if (added > 0) this.saveToDisk();
+    return added;
+  }
+  replaceAll(arr) {
+    const lines = Array.isArray(arr) ? arr : String(arr || '').split(/\r?\n/);
+    this.usernames.clear();
+    for (const line of lines) { const clean = normalizeTikTokHandle(line).toLowerCase(); if (clean) this.usernames.add(clean); }
+    this.saveToDisk(); return this.usernames.size;
+  }
+  saveToDisk() {
+    const content = Array.from(this.usernames).join('\n') + (this.usernames.size ? '\n' : '');
+    this.writeChain = this.writeChain.then(() => fsp.writeFile(this.filePath, content)).catch(() => {});
+  }
+  all() { return Array.from(this.usernames); }
+}
+
+const ttBlacklist = new TikTokBlacklist(CONFIG.ttBlacklistPath);
+ttBlacklist.load();
+
+const tiktokProfileCache = new Map();
+
+// ============================================================================
+// MULTI-TENANT SESSION MANAGER
+// ============================================================================
+class ClientSession {
+  constructor(sessionId) {
+    this.sessionId = sessionId;
+    this.username = 'Unknown';
+    this.auth = { loggedIn: false, cookieHeader: '', ttCookieId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '', accountName: '', autoBlockSharers: false };
+    this.state = { connected: false, username: null, roomId: null, error: null };
+    this.sharers = new Map();
+    this.connection = null;
+    this.jobs = new Map();
+    this.sseClients = new Set();
+    this.diagnosticHistory = [];
+  }
+
+  broadcast(payload) {
+    const msg = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const res of this.sseClients) {
+      try { res.write(msg); } catch (e) { this.sseClients.delete(res); }
+    }
+  }
+
+  recordDiagnostic(entry) {
+    const item = { id: crypto.randomUUID(), timestamp: new Date().toISOString(), ...entry };
+    this.diagnosticHistory.push(item);
+    if (this.diagnosticHistory.length > 250) this.diagnosticHistory.shift();
+    return item;
+  }
+}
+
+const sessions = new Map();
+function getSession(id) {
+  if (!sessions.has(id)) sessions.set(id, new ClientSession(id));
+  return sessions.get(id);
+}
+
+function broadcastGlobalBlacklist() {
+  const list = ttBlacklist.all();
+  for (const session of sessions.values()) {
+    for (const [uid, entry] of session.sharers.entries()) {
+      entry.blacklisted = ttBlacklist.has(uid);
+    }
+    session.broadcast({ type: 'BLACKLIST', blacklist: list });
+  }
+}
+
+// ============================================================================
+// TIKTOK UTILS & RESOLVERS
+// ============================================================================
 let tiktokLib = null;
 async function getTikTokLib() { if (!tiktokLib) tiktokLib = await import('tiktok-live-connector'); return tiktokLib; }
 
@@ -137,19 +169,19 @@ const ttResolveFlight = singleFlight();
 
 async function buildTikTokCookieHeader(session, rawInput) {
   const trimmed = String(rawInput || '').trim();
-  if (!trimmed) return { cookieHeader: '', sessionId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '' };
+  if (!trimmed) return { cookieHeader: '', ttCookieId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '' };
 
-  let sessionIdVal = '', ttTargetIdc = 'useast1a', cookieHeader = '', csrfToken = '', msToken = '';
+  let ttCookieId = '', ttTargetIdc = 'useast1a', cookieHeader = '', csrfToken = '', msToken = '';
   if (trimmed.includes('=')) {
     const m = /sessionid=([^;\s]+)/i.exec(trimmed) || /sessionid_ss=([^;\s]+)/i.exec(trimmed);
-    sessionIdVal = m ? m[1] : '';
+    ttCookieId = m ? m[1] : '';
     const cm = /(?:tt_csrf_token|csrf_session_id|passport_csrf_token)=([^;\s]+)/i.exec(trimmed);
     if (cm) csrfToken = cm[1];
     const mm = /msToken=([^;\s]+)/i.exec(trimmed);
     if (mm) msToken = mm[1];
     cookieHeader = trimmed;
   } else {
-    sessionIdVal = trimmed;
+    ttCookieId = trimmed;
     csrfToken = crypto.randomBytes(16).toString('hex');
     cookieHeader = `sessionid=${trimmed}; sessionid_ss=${trimmed}; tt_csrf_token=${csrfToken}; passport_csrf_token=${csrfToken};`;
   }
@@ -164,7 +196,7 @@ async function buildTikTokCookieHeader(session, rawInput) {
     }
   }).catch(() => {});
 
-  return { cookieHeader, sessionId: sessionIdVal, ttTargetIdc, csrfToken, msToken };
+  return { cookieHeader, ttCookieId, ttTargetIdc, csrfToken, msToken };
 }
 
 function extractShareUser(data) {
@@ -330,9 +362,8 @@ async function blockTikTokUserOnAccount(session, userObj) {
 async function runParallelTikTokBlockBatch(session, usernames) {
   const cleanList = [...new Set(usernames.map(u => normalizeTikTokHandle(u)).filter(Boolean))];
   
-  // Instantly save to user's personal blacklist
-  for (const uname of cleanList) session.blacklist.add(uname.toLowerCase());
-  session.saveBlacklist();
+  for (const uname of cleanList) ttBlacklist.add(uname.toLowerCase());
+  broadcastGlobalBlacklist();
 
   let cursor = 0, blockedOnTikTokCount = 0, failedCount = 0, lastNote = null;
   const worker = async (laneIdx) => {
@@ -354,7 +385,6 @@ async function runParallelTikTokBlockBatch(session, usernames) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONFIG.tiktok.blockConcurrency, cleanList.length) }, (_, i) => worker(i)));
-  session.broadcast({ type: 'BLACKLIST', blacklist: Array.from(session.blacklist) });
   return { totalBlacklisted: cleanList.length, blockedOnTikTokCount, failedCount, lastNote };
 }
 
@@ -372,7 +402,7 @@ function recordTikTokSharer(session, data) {
   if (existing && Date.now() - existing.timestamp < CONFIG.tiktok.shareDedupWindowMs) return;
 
   const shareCount = existing ? existing.shareCount + 1 : 1;
-  const isBlacklisted = session.blacklist.has(parsed.uniqueId.toLowerCase());
+  const isBlacklisted = ttBlacklist.has(parsed.uniqueId.toLowerCase());
   
   const userEntry = {
     uniqueId: parsed.uniqueId, nickname: parsed.nickname, userId: parsed.userId || existing?.userId || '', secUid: parsed.secUid || existing?.secUid || '',
@@ -381,11 +411,10 @@ function recordTikTokSharer(session, data) {
   session.sharers.set(parsed.uniqueId, userEntry);
 
   if (session.auth.autoBlockSharers && shareCount >= 2 && !isBlacklisted) {
-    session.blacklist.add(parsed.uniqueId.toLowerCase());
-    session.saveBlacklist();
+    ttBlacklist.add([parsed.uniqueId.toLowerCase()]);
+    broadcastGlobalBlacklist();
     userEntry.blacklisted = true;
     if (session.auth.loggedIn) blockTikTokUserOnAccount(session, userEntry).catch(() => {});
-    session.broadcast({ type: 'BLACKLIST', blacklist: Array.from(session.blacklist) });
   } else if (!userEntry.secUid || !userEntry.userId) {
     resolveTikTokUserProfile(session, parsed.uniqueId).then(resolved => {
       if (resolved.userId && !userEntry.userId) userEntry.userId = resolved.userId;
@@ -412,10 +441,12 @@ app.get('/', (req, res) => {
 
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/tiktok')) return next();
-  const clientId = req.headers['x-client-id'] || req.query.clientId;
-  if (!clientId) return res.status(401).json({ error: 'Missing x-client-id header.' });
-  req.clientId = clientId;
-  req.session = getSession(clientId);
+  const sessionId = req.headers['x-session-id'] || req.query.sessionId;
+  if (!sessionId) return res.status(401).json({ error: 'Missing x-session-id header.' });
+  
+  req.sessionId = sessionId;
+  req.session = getSession(sessionId);
+  req.session.username = req.headers['x-username'] || req.query.username || 'Unknown';
   next();
 });
 
@@ -443,7 +474,7 @@ app.get('/api/tiktok/stream', (req, res) => {
     state: req.session.state, 
     auth: { loggedIn: req.session.auth.loggedIn, accountName: req.session.auth.accountName, autoBlockSharers: req.session.auth.autoBlockSharers }, 
     sharers: Array.from(req.session.sharers.values()), 
-    blacklist: Array.from(req.session.blacklist) 
+    blacklist: ttBlacklist.all() 
   })}\n\n`);
 
   const keepAlive = setInterval(() => { try { res.write(': ping\n\n'); } catch (e) {} }, 15000);
@@ -457,13 +488,13 @@ app.post('/api/tiktok/login', asyncRoute(async (req, res) => {
 
   req.session.auth.loggedIn = true;
   req.session.auth.cookieHeader = parsed.cookieHeader;
-  req.session.auth.sessionId = parsed.sessionId;
+  req.session.auth.ttCookieId = parsed.ttCookieId;
   req.session.auth.ttTargetIdc = parsed.ttTargetIdc || 'useast1a';
   req.session.auth.csrfToken = parsed.csrfToken;
   req.session.auth.msToken = parsed.msToken;
   req.session.auth.accountName = normalizeTikTokHandle(accountName) || 'TikTok Account';
 
-  prewarmTikTokProfiles(req.session, Array.from(req.session.blacklist)).catch(() => {});
+  prewarmTikTokProfiles(req.session, ttBlacklist.all()).catch(() => {});
   
   const payload = { loggedIn: true, accountName: req.session.auth.accountName, autoBlockSharers: req.session.auth.autoBlockSharers };
   req.session.broadcast({ type: 'AUTH', auth: payload });
@@ -471,7 +502,7 @@ app.post('/api/tiktok/login', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/tiktok/logout', (req, res) => {
-  req.session.auth = { loggedIn: false, cookieHeader: '', sessionId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '', accountName: '', autoBlockSharers: false };
+  req.session.auth = { loggedIn: false, cookieHeader: '', ttCookieId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '', accountName: '', autoBlockSharers: false };
   req.session.broadcast({ type: 'AUTH', auth: req.session.auth });
   res.json({ success: true });
 });
@@ -483,7 +514,7 @@ app.post('/api/tiktok/auto-block', (req, res) => {
 });
 
 app.get('/api/tiktok/blacklist', (req, res) => {
-  const list = Array.from(req.session.blacklist);
+  const list = ttBlacklist.all();
   prewarmTikTokProfiles(req.session, list).catch(() => {});
   res.json({ usernames: list, text: list.join('\n') });
 });
@@ -492,18 +523,11 @@ app.post('/api/tiktok/blacklist/save', (req, res) => {
   const { text, usernames } = req.body || {};
   const arr = Array.isArray(usernames) ? usernames : String(text || '').split(/\r?\n/);
   
-  req.session.blacklist.clear();
-  for (const line of arr) {
-    const clean = normalizeTikTokHandle(line).toLowerCase();
-    if (clean) req.session.blacklist.add(clean);
-  }
-  req.session.saveBlacklist();
-
-  const allList = Array.from(req.session.blacklist);
-  for (const [uid, entry] of req.session.sharers.entries()) entry.blacklisted = req.session.blacklist.has(uid.toLowerCase());
+  ttBlacklist.replaceAll(arr);
+  broadcastGlobalBlacklist();
   
+  const allList = ttBlacklist.all();
   prewarmTikTokProfiles(req.session, allList).catch(() => {});
-  req.session.broadcast({ type: 'BLACKLIST', blacklist: allList });
   res.json({ success: true, total: allList.length, usernames: allList });
 });
 
@@ -512,7 +536,7 @@ app.post('/api/tiktok/block', asyncRoute(async (req, res) => {
   const targets = Array.isArray(usernames) ? usernames : [];
   if (targets.length === 0) return res.status(400).json({ error: 'No usernames provided to block.' });
   const batchRes = await runParallelTikTokBlockBatch(req.session, targets);
-  res.json({ success: true, totalBlacklisted: batchRes.totalBlacklisted, blockedOnTikTokCount: batchRes.blockedOnTikTokCount, failedCount: batchRes.failedCount, loggedIn: req.session.auth.loggedIn, note: batchRes.lastNote, blacklist: Array.from(req.session.blacklist) });
+  res.json({ success: true, totalBlacklisted: batchRes.totalBlacklisted, blockedOnTikTokCount: batchRes.blockedOnTikTokCount, failedCount: batchRes.failedCount, loggedIn: req.session.auth.loggedIn, note: batchRes.lastNote, blacklist: ttBlacklist.all() });
 }));
 
 app.post('/api/tiktok/jobs/block', asyncRoute(async (req, res) => {
@@ -520,8 +544,8 @@ app.post('/api/tiktok/jobs/block', asyncRoute(async (req, res) => {
   const list = Array.isArray(usernames) ? [...new Set(usernames.map(u => normalizeTikTokHandle(u).toLowerCase()).filter(Boolean))] : [];
   if (list.length === 0) return res.status(400).json({ error: 'No usernames provided.' });
 
-  for (const u of list) req.session.blacklist.add(u);
-  req.session.saveBlacklist();
+  for (const u of list) ttBlacklist.add(u);
+  broadcastGlobalBlacklist();
 
   const jobId = crypto.randomUUID();
   const jobObj = { id: jobId, status: 'running', total: list.length, processed: 0, blockedOnTikTokCount: 0, failedCount: 0, currentUsername: null, lastNote: null, startedAt: Date.now(), finishedAt: null, cancelRequested: false };
@@ -552,7 +576,6 @@ app.post('/api/tiktok/jobs/block', asyncRoute(async (req, res) => {
     await Promise.all(Array.from({ length: Math.min(CONFIG.tiktok.blockConcurrency, list.length) }, (_, i) => worker(i)));
     if (jobObj.status === 'running') jobObj.status = 'done';
     jobObj.currentUsername = null; jobObj.finishedAt = Date.now();
-    req.session.broadcast({ type: 'BLACKLIST', blacklist: Array.from(req.session.blacklist) });
   })().catch(err => { jobObj.status = 'aborted'; jobObj.lastNote = err.message; jobObj.finishedAt = Date.now(); });
   
   res.status(202).json(jobObj);
@@ -573,7 +596,7 @@ app.delete('/api/tiktok/jobs/:id', (req, res) => {
 
 app.get('/api/tiktok/diagnostics', (req, res) => {
   res.json({
-    auth: { loggedIn: req.session.auth.loggedIn, accountName: req.session.auth.accountName, hasSessionId: Boolean(req.session.auth.sessionId) },
+    auth: { loggedIn: req.session.auth.loggedIn, accountName: req.session.auth.accountName, hasCookieId: Boolean(req.session.auth.ttCookieId) },
     cachedProfilesCount: tiktokProfileCache.size,
     recentAttempts: req.session.diagnosticHistory.slice().reverse(),
   });
@@ -600,8 +623,8 @@ app.post('/api/tiktok/connect', asyncRoute(async (req, res) => {
 
     const options = { processInitialData: true, enableExtendedGiftInfo: false, enableWebsocketUpgrade: true, requestPollingIntervalMs: 700 };
     if (CONFIG.eulerApiKey) options.signApiKey = CONFIG.eulerApiKey;
-    if (req.session.auth.loggedIn && req.session.auth.sessionId) {
-      options.sessionId = req.session.auth.sessionId;
+    if (req.session.auth.loggedIn && req.session.auth.ttCookieId) {
+      options.sessionId = req.session.auth.ttCookieId;
       options.ttTargetIdc = req.session.auth.ttTargetIdc || 'useast1a';
     }
 
@@ -630,11 +653,11 @@ app.post('/api/tiktok/connect', asyncRoute(async (req, res) => {
       req.session.broadcast({ type: 'STATUS', state: req.session.state });
     });
 
-    conn.on('error', err => log.warn(`TikTok [${req.session.clientId}] error:`, err?.message || err));
+    conn.on('error', err => log.warn(`[${req.session.username} | ${req.session.sessionId}] Connection error:`, err?.message || err));
 
     const state = await conn.connect();
     req.session.state = { connected: true, username: rawUsername, roomId: String(state?.roomId || 'live'), error: null };
-    log.info(`[${req.session.clientId}] Connected to LIVE @${rawUsername}`);
+    log.info(`[${req.session.username} | ${req.session.sessionId}] Connected to LIVE @${rawUsername}`);
     req.session.broadcast({ type: 'STATUS', state: req.session.state });
     res.json({ success: true, state: req.session.state });
   } catch (err) {
@@ -662,7 +685,7 @@ app.get('/api/tiktok/sharers', (req, res) => {
     state: req.session.state,
     auth: { loggedIn: req.session.auth.loggedIn, accountName: req.session.auth.accountName, autoBlockSharers: req.session.auth.autoBlockSharers },
     sharers: Array.from(req.session.sharers.values()),
-    blacklist: Array.from(req.session.blacklist),
+    blacklist: ttBlacklist.all(),
   });
 });
 
