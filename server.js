@@ -1,1271 +1,291 @@
 'use strict';
 
-/**
- * NEXUS — TikTok LIVE share listener + fast account blocker.
- *
- * TikTok refuses block requests that aren't signed by the security script on its own pages,
- * which is why plain server-side requests always failed. This server keeps one hidden Chrome
- * tab open on tiktok.com per connected account and fires the block requests from inside it,
- * many at once, so TikTok's script signs every one. No page clicking in the normal case:
- * the profile page is only opened as a fallback if TikTok's request format changes.
- */
-
-const path = require('path');
-
 const express = require('express');
+const axios = require('axios');
+const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
+const fsp = require('fs/promises');
+const path = require('path');
 const cors = require('cors');
 
-const DATA_DIR = process.env.DATA_DIR || __dirname;
+require('events').EventEmitter.defaultMaxListeners = 250;
 
 const CONFIG = {
   port: Number(process.env.PORT) || 3000,
+  ttBlacklistPath: process.env.TT_BLACKLIST_PATH || path.join(__dirname, 'tiktok_blacklist.txt'),
+  ttProfilesPath: process.env.TT_PROFILES_PATH || path.join(__dirname, 'tiktok_profiles_cache.json'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   eulerApiKey: process.env.EULER_API_KEY || null,
-  files: {
-    blacklist: process.env.TT_BLACKLIST_PATH || path.join(DATA_DIR, 'tiktok_blacklist.txt'),
-    profiles: path.join(DATA_DIR, 'tiktok_profiles.json'),
-    ledger: path.join(DATA_DIR, 'tiktok_blocked.json'),
-    templates: path.join(DATA_DIR, 'tiktok_block_template.json'),
+  tiktok: {
+    resolveTimeoutMs: 8500,
+    blockTimeoutMs: 9000,
+    maxBlockRetries: 3,
+    blockConcurrency: 2,
+    blockStaggerMs: 380,
+    tikwmMinIntervalMs: 1150,
+    profileCacheTtlMs: 7 * 24 * 60 * 60 * 1000,
+    shareDedupWindowMs: 1200,
   },
-  // Low-memory mode (default) keeps everything inside ~512 MB: a single-process headless browser
-  // that only runs while blocking. Set LOW_MEMORY=0 on bigger machines for a bit more speed.
-  lowMemory: process.env.LOW_MEMORY !== '0',
-  browser: {
-    headless: process.env.HEADFUL !== '1',
-    // Close the browser after this long without blocks (it reopens automatically when needed).
-    idleCloseMs: Number(process.env.BROWSER_IDLE_MS) || 3 * 60 * 1000,
-    // Slow hosts (e.g. Render Free, 0.1 CPU) need much longer to load TikTok's page.
-    navTimeoutMs: Number(process.env.NAV_TIMEOUT_MS) || 90000,
-  },
-  block: {
-    // Parallel block requests per account. Raise for speed, lower if TikTok starts rate-limiting.
-    concurrency: Math.max(1, Math.min(24, Number(process.env.BLOCK_CONCURRENCY) || 10)),
-    uiPages: process.env.LOW_MEMORY === '0' ? 2 : 1, // profile-page fallback tabs
-    staggerMs: 25,
-    uiReadyTimeoutMs: 45000, // wait for the profile page's buttons to start working
-    uiDialogTimeoutMs: 15000,
-    uiResponseTimeoutMs: 60000,
-    uiAfterConfirmMs: 15000,
-    uiFailuresBeforeStop: 2, // stop a job instead of grinding through the list when clicks don't work
-    pauseOnLimitMs: 45000,
-    maxStrikes: 3,
-    apiFailuresBeforeUi: 4,
-  },
-  share: { dedupWindowMs: 1200, defaultThreshold: 2 },
-  sessionIdleMs: 3 * 60 * 60 * 1000,
 };
 
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const HANDLE_RE = /^[a-z0-9._]{2,24}$/;
-
 // ============================================================================
-// LOGGING & HELPERS
+// TELEMETRY & LOGGING
 // ============================================================================
-const ts = () => new Date().toISOString();
-const log = {
-  info: (...a) => console.log(`[${ts()}] [info]`, ...a),
-  warn: (...a) => console.warn(`[${ts()}] [warn]`, ...a),
-  error: (...a) => console.error(`[${ts()}] [error]`, ...a),
-};
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-const safeJson = (t) => {
-  try {
-    return JSON.parse(t);
-  } catch {
-    return null;
-  }
-};
-
-function normalizeHandle(raw) {
-  let s = String(raw || '').trim();
-  const m = /tiktok\.com\/@([^/?#\s]+)/i.exec(s);
-  if (m) s = m[1];
-  return s.replace(/^@+/, '').trim().toLowerCase();
-}
-const isValidHandle = (h) => HANDLE_RE.test(h);
-
-function cleanHandleList(input) {
-  const arr = Array.isArray(input) ? input : String(input || '').split(/[\r\n,]+/);
-  return [...new Set(arr.map(normalizeHandle).filter(isValidHandle))];
-}
-
-// ============================================================================
-// PERSISTENCE
-// ============================================================================
-class JsonFile {
-  constructor(file, fallback) {
-    this.file = file;
-    this.data = fallback;
-    this.timer = null;
-    try {
-      if (fs.existsSync(file)) this.data = JSON.parse(fs.readFileSync(file, 'utf8')) || fallback;
-    } catch (e) {
-      log.warn(`Could not read ${path.basename(file)}, starting fresh:`, e.message);
-    }
-  }
-  save() {
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      const tmp = `${this.file}.tmp`;
-      fs.promises
-        .writeFile(tmp, JSON.stringify(this.data))
-        .then(() => fs.promises.rename(tmp, this.file))
-        .catch((e) => log.warn(`Write failed for ${path.basename(this.file)}:`, e.message));
-    }, 400);
-  }
-}
-
-class Blacklist {
-  constructor(file) {
-    this.file = file;
-    this.set = new Set();
-    this.chain = Promise.resolve();
-    try {
-      if (fs.existsSync(file)) {
-        const raw = fs.readFileSync(file, 'utf8');
-        const clean = cleanHandleList(raw);
-        clean.forEach((h) => this.set.add(h));
-        if (clean.length !== raw.split(/\r?\n/).filter((l) => l.trim()).length) this.persist();
-      } else fs.writeFileSync(file, '');
-    } catch (e) {
-      log.warn('Blacklist load failed:', e.message);
-    }
-  }
-  has(h) {
-    return this.set.has(normalizeHandle(h));
-  }
-  add(list) {
-    let n = 0;
-    for (const h of cleanHandleList(list)) if (!this.set.has(h)) (this.set.add(h), n++);
-    if (n) this.persist();
-    return n;
-  }
-  replaceAll(list) {
-    this.set = new Set(cleanHandleList(list));
-    this.persist();
-    return this.set.size;
-  }
-  persist() {
-    const body = [...this.set].join('\n') + (this.set.size ? '\n' : '');
-    this.chain = this.chain.then(() => fs.promises.writeFile(this.file, body)).catch(() => {});
-  }
-  all() {
-    return [...this.set];
-  }
-}
-
-const blacklist = new Blacklist(CONFIG.files.blacklist);
-const profiles = new JsonFile(CONFIG.files.profiles, {}); // handle -> { userId, secUid, nickname, at }
-const ledger = new JsonFile(CONFIG.files.ledger, {}); // accountUid -> { handle: blockedAt }
-const templates = new JsonFile(CONFIG.files.templates, {}); // accountUid -> learned request
-
-function rememberProfile(handle, info) {
-  const h = normalizeHandle(handle);
-  if (!isValidHandle(h)) return;
-  const prev = profiles.data[h] || {};
-  const next = {
-    userId: String(info.userId || prev.userId || ''),
-    secUid: String(info.secUid || prev.secUid || ''),
-    nickname: info.nickname || prev.nickname || '',
-    at: Date.now(),
-  };
-  if (!next.userId && !next.secUid) return;
-  profiles.data[h] = next;
-  const keys = Object.keys(profiles.data);
-  if (keys.length > 60000) {
-    keys
-      .sort((a, b) => profiles.data[a].at - profiles.data[b].at)
-      .slice(0, 10000)
-      .forEach((k) => delete profiles.data[k]);
-  }
-  profiles.save();
-}
-const knownProfile = (h) => {
-  const p = profiles.data[normalizeHandle(h)];
-  return p && p.userId && p.secUid ? p : null;
-};
-const isInLedger = (uid, h) => Boolean(uid && ledger.data[uid]?.[h]);
-function addToLedger(uid, h) {
-  if (!uid) return;
-  (ledger.data[uid] ||= {})[h] = Date.now();
-  ledger.save();
-}
-
-// ============================================================================
-// HEADLESS BROWSER ENGINE
-// ============================================================================
-// The server needs a Chromium-based browser on the machine it runs on (not the browser you
-// use to open the dashboard). It looks for one in this order:
-//   1. PUPPETEER_EXECUTABLE_PATH / CHROME_PATH env var
-//   2. a Chrome that Puppeteer already downloaded
-//   3. Chrome, Edge, Brave or Chromium installed on the machine
-//   4. otherwise it downloads its own Chrome into ./.cache (first start only)
-let puppeteer = null;
-let browserPromise = null;
-let browserError = null;
-let browserPath = null;
-let browserSetup = null;
-let lastBrowserUse = Date.now();
-const engineStatus = { state: 'idle', progress: 0, message: '' };
-
-const BROWSER_CACHE = path.join(__dirname, '.cache', 'puppeteer');
-const loadPuppeteer = () => (puppeteer ||= require('puppeteer'));
-const loadBrowsers = () => require(require.resolve('@puppeteer/browsers', { paths: [path.dirname(require.resolve('puppeteer'))] }));
-
-function setEngineStatus(state, message = '', progress = engineStatus.progress) {
-  const changed = state !== engineStatus.state || message !== engineStatus.message || Math.abs(progress - engineStatus.progress) >= 5;
-  Object.assign(engineStatus, { state, message, progress });
-  if (!changed) return;
-  for (const s of sessions.values()) s.broadcast({ type: 'ENGINE', engine: { ...engineStatus } });
-}
-
-function systemBrowserPaths() {
-  const env = process.env;
-  if (process.platform === 'win32') {
-    const roots = [env.PROGRAMFILES || 'C:\\Program Files', env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', env.LOCALAPPDATA || ''];
-    const rel = [
-      'Google\\Chrome\\Application\\chrome.exe',
-      'Microsoft\\Edge\\Application\\msedge.exe',
-      'BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-      'Chromium\\Application\\chrome.exe',
-    ];
-    return rel.flatMap((r) => roots.filter(Boolean).map((root) => path.join(root, r)));
-  }
-  if (process.platform === 'darwin') {
-    return [
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    ];
-  }
-  return [
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/snap/bin/chromium',
-    '/usr/bin/microsoft-edge',
-    '/usr/bin/microsoft-edge-stable',
-    '/usr/bin/brave-browser',
-  ];
-}
-
-async function findDownloadedChrome() {
-  const { getInstalledBrowsers } = loadBrowsers();
-  const dirs = [
-    process.env.PUPPETEER_CACHE_DIR,
-    BROWSER_CACHE,
-    path.join(path.dirname(require.resolve('puppeteer')), '..', '.cache', 'puppeteer'),
-    path.join(require('os').homedir(), '.cache', 'puppeteer'),
-  ].filter(Boolean);
-  for (const cacheDir of [...new Set(dirs)]) {
-    try {
-      const found = (await getInstalledBrowsers({ cacheDir })).filter(
-        (b) => (b.browser === 'chrome-headless-shell' || b.browser === 'chrome') && fs.existsSync(b.executablePath)
-      );
-      // The headless-only build uses noticeably less memory, so it wins when present.
-      const rank = (b) => (b.browser === 'chrome-headless-shell' ? 1 : 0);
-      found.sort((a, b) => rank(b) - rank(a) || String(b.buildId).localeCompare(String(a.buildId), undefined, { numeric: true }));
-      if (found[0]) return found[0].executablePath;
-    } catch {}
-  }
-  return null;
-}
-
-async function downloadChrome() {
-  const { install, Browser, detectBrowserPlatform } = loadBrowsers();
-  const revisions = loadPuppeteer().PUPPETEER_REVISIONS || require('puppeteer-core').PUPPETEER_REVISIONS;
-  const browser = CONFIG.lowMemory ? Browser.CHROMEHEADLESSSHELL : Browser.CHROME;
-  const buildId = CONFIG.lowMemory ? revisions['chrome-headless-shell'] : revisions.chrome;
-  const platform = detectBrowserPlatform();
-  if (!platform) throw new Error(`Chrome can't be downloaded for this system (${process.platform}/${process.arch}). Install Chrome or Chromium on the server.`);
-  log.info(`No browser found on the server — downloading Chrome ${buildId} into .cache (first start only)…`);
-  setEngineStatus('downloading', 'Downloading Chrome for the server (first start only)…', 0);
-  const installed = await install({
-    browser,
-    buildId,
-    platform,
-    cacheDir: BROWSER_CACHE,
-    downloadProgressCallback: (done, total) => {
-      if (total) setEngineStatus('downloading', 'Downloading Chrome for the server (first start only)…', Math.round((done / total) * 100));
-    },
+const telemetryRingBuffer = [];
+function pushTelemetry(level, scope, message) {
+  telemetryRingBuffer.push({
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    level,
+    scope,
+    message,
   });
-  log.info('Chrome downloaded.');
-  return installed.executablePath;
+  if (telemetryRingBuffer.length > 250) telemetryRingBuffer.shift();
 }
 
-async function resolveBrowserPath() {
-  if (browserPath && fs.existsSync(browserPath)) return browserPath;
-  if (browserSetup) return browserSetup;
-  browserSetup = (async () => {
-    setEngineStatus('finding', 'Looking for a browser on the server…', 0);
-    const fromEnv = [process.env.PUPPETEER_EXECUTABLE_PATH, process.env.CHROME_PATH].find((p) => p && fs.existsSync(p));
-    const downloaded = await findDownloadedChrome();
-    const preferShell = CONFIG.lowMemory && downloaded && /headless-shell/i.test(downloaded);
-    const found =
-      fromEnv ||
-      (preferShell ? downloaded : null) ||
-      downloaded ||
-      systemBrowserPaths().find((p) => {
-        try {
-          return fs.existsSync(p);
-        } catch {
-          return false;
-        }
-      }) ||
-      (await downloadChrome());
-    browserPath = found;
-    log.info(`Using browser: ${found}`);
-    return found;
-  })();
-  try {
-    return await browserSetup;
-  } catch (e) {
-    setEngineStatus('error', e.message);
-    throw e;
-  } finally {
-    browserSetup = null;
-  }
-}
+const log = {
+  info: (...a) => {
+    const msg = a.join(' ');
+    console.log(`[${new Date().toISOString()}] [info]`, msg);
+    pushTelemetry('info', 'system', msg);
+  },
+  warn: (...a) => {
+    const msg = a.join(' ');
+    console.warn(`[${new Date().toISOString()}] [warn]`, msg);
+    pushTelemetry('warn', 'system', msg);
+  },
+  error: (...a) => {
+    const msg = a.join(' ');
+    console.error(`[${new Date().toISOString()}] [error]`, msg);
+    pushTelemetry('error', 'system', msg);
+  },
+};
 
-function explainLaunchError(e) {
-  const msg = String(e?.message || e);
-  if (/error while loading shared libraries|libnss3|libatk|libgbm|libasound/i.test(msg)) {
-    return 'Chrome is missing system libraries on this server. On Linux run: sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libasound2';
-  }
-  if (/ENOSPC/i.test(msg)) return 'The server ran out of disk space while setting up Chrome.';
-  if (/ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|getaddrinfo/i.test(msg)) return "The server couldn't download Chrome (no internet access). Install Chrome or Chromium on the server and restart.";
-  return `The browser could not start on the server: ${msg.split('\n')[0]}`;
-}
+const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-async function getBrowser() {
-  if (browserPromise) {
-    const b = await browserPromise.catch(() => null);
-    if (b && b.connected) return b;
-    browserPromise = null;
-  }
-  browserPromise = (async () => {
-    const executablePath = await resolveBrowserPath();
-    setEngineStatus('starting', "Starting the server's browser…", 0);
-    const shell = /headless[-_]shell/i.test(executablePath);
-    const lowMemArgs = CONFIG.lowMemory
-      ? [
-          // One process instead of ~5: saves ~60 MB. Works because low-memory mode keeps one
-          // account in the browser's default profile (separate profiles need multi-process).
-          '--single-process',
-          '--no-zygote',
-          '--renderer-process-limit=1',
-          '--disable-site-isolation-trials',
-          '--disk-cache-size=1048576',
-          '--media-cache-size=1',
-          '--aggressive-cache-discard',
-          '--disable-software-rasterizer',
-          '--disable-component-update',
-          '--disable-domain-reliability',
-          '--disable-breakpad',
-          '--blink-settings=imagesEnabled=false',
-        ]
-      : ['--renderer-process-limit=2'];
-    return loadPuppeteer().launch({
-      headless: shell ? 'shell' : CONFIG.browser.headless,
-      executablePath,
-      args: [
-        ...lowMemArgs,
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-gpu',
-        '--disable-extensions',
-        '--disable-sync',
-        '--disable-default-apps',
-        '--mute-audio',
-        '--disable-background-networking',
-        '--disable-features=Translate,BackForwardCache,MediaRouter,OptimizationHints,site-per-process,IsolateOrigins',
-        '--lang=en-US',
-        CONFIG.lowMemory ? '--window-size=1024,700' : '--window-size=1366,900',
-      ],
-      defaultViewport: CONFIG.lowMemory ? { width: 1024, height: 700 } : { width: 1366, height: 900 },
-    });
-  })();
-  try {
-    const b = await browserPromise;
-    browserError = null;
-    setEngineStatus('ready', '', 100);
-    b.on('disconnected', () => {
-      log.warn('Browser closed — it will reopen on the next block.');
-      browserPromise = null;
-      for (const s of sessions.values()) if (s.account) s.account.ready = false;
-    });
-    log.info('Headless browser started.');
-    return b;
-  } catch (e) {
-    browserPromise = null;
-    const friendly = explainLaunchError(e);
-    browserError = friendly;
-    if (browserPath && !/shared libraries|disk space/.test(friendly)) browserPath = null; // try another browser next time
-    setEngineStatus('error', friendly);
-    log.error(friendly);
-    throw new EngineError('engine_unavailable', friendly);
-  }
-}
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 60000,
+  maxSockets: 128,
+  rejectUnauthorized: true,
+});
 
-class EngineError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code;
-  }
-}
+const tiktokHttp = axios.create({
+  httpsAgent,
+  timeout: CONFIG.tiktok.resolveTimeoutMs,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+  },
+  validateStatus: () => true,
+});
 
-function parseCookieInput(raw) {
-  const text = String(raw || '').trim();
-  if (!text) return [];
-  // JSON export from a cookie extension
-  if (text.startsWith('[')) {
-    const arr = safeJson(text);
-    if (Array.isArray(arr)) {
-      return arr
-        .filter((c) => c && c.name && c.value != null && /tiktok\.com$/i.test(String(c.domain || '.tiktok.com')))
-        .map((c) => ({ name: String(c.name), value: String(c.value) }));
+function toNumericIdString(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') {
+    const t = val.trim();
+    return /^\d+$/.test(t) && t !== '0' ? t : '';
+  }
+  if (typeof val === 'number') {
+    return Number.isFinite(val) && val > 0 ? String(Math.trunc(val)) : '';
+  }
+  if (typeof val === 'bigint') {
+    return val > 0n ? val.toString() : '';
+  }
+  if (typeof val === 'object') {
+    if (typeof val.low === 'number' && typeof val.high === 'number') {
+      try {
+        const h = BigInt(val.high >>> 0);
+        const l = BigInt(val.low >>> 0);
+        const c = (h * 4294967296n) + l;
+        if (c > 0n) return c.toString();
+      } catch (e) {}
+    }
+    if (typeof val.toString === 'function') {
+      const s = String(val.toString()).trim();
+      if (/^\d+$/.test(s) && s !== '0') return s;
     }
   }
-  if (!text.includes('=')) {
-    return ['sessionid', 'sessionid_ss', 'sid_tt'].map((name) => ({ name, value: text }));
-  }
+  return '';
+}
+
+function normalizeTikTokHandle(raw) {
+  return String(raw ? raw : '')
+    .trim()
+    .replace(/^@+/, '')
+    .trim();
+}
+
+/**
+ * Safely parses any string or array into clean TikTok usernames (min 2 chars).
+ * Never iterates character-by-character over a string.
+ */
+function parseUsernameList(input) {
+  const rawItems = Array.isArray(input) ? input : [String(input ? input : '')];
   const out = [];
-  for (const part of text.replace(/^cookie:\s*/i, '').split(';')) {
-    const i = part.indexOf('=');
-    if (i <= 0) continue;
-    const name = part.slice(0, i).trim();
-    const value = part.slice(i + 1).trim().replace(/^"(.*)"$/, '$1');
-    if (/^[\w.\-]+$/.test(name) && value) out.push({ name, value });
+  const seen = new Set();
+
+  for (const item of rawItems) {
+    const parts = String(item ? item : '').split(/[\r\n,;\s]+/);
+    for (const part of parts) {
+      const clean = normalizeTikTokHandle(part).toLowerCase();
+      if (clean.length >= 2 && !seen.has(clean)) {
+        seen.add(clean);
+        out.push(clean);
+      }
+    }
   }
   return out;
 }
 
-async function readScope(page) {
-  return page
-    .evaluate(() => {
-      const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-      if (!el) return null;
-      try {
-        return JSON.parse(el.textContent).__DEFAULT_SCOPE__ || null;
-      } catch {
-        return null;
-      }
-    })
-    .catch(() => null);
-}
+// ============================================================================
+// PERSISTENT PROFILE CACHE (SURVIVES RESTARTS)
+// ============================================================================
+const tiktokProfileCache = new Map();
 
-async function hasCaptcha(page) {
-  return page
-    .evaluate(() => {
-      const el = document.querySelector(
-        '#captcha-verify-container, #captcha_container, .captcha-verify-container, .captcha_verify_container, [class*="captcha_verify"], [id^="captcha"]'
-      );
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    })
-    .catch(() => false);
-}
-
-/** XHR from inside the TikTok page, so TikTok's SDK adds its signatures. */
-/**
- * Sends a request from inside the TikTok tab so TikTok's own security script signs it.
- * TikTok's web app sends its API calls with fetch(), and that's what its script hooks, so
- * 'fetch' is the default; 'xhr' is kept as a fallback for setups where the script hooks XHR.
- */
-async function pageRequest(page, { method = 'GET', url, body = null, contentType = null, transport = 'fetch' }) {
-  return page.evaluate(
-    async (o) => {
-      let finalUrl = o.url;
-      if (finalUrl.includes('{{msToken}}')) {
-        const m = /(?:^|;\s*)msToken=([^;]+)/.exec(document.cookie);
-        let tok = m ? m[1] : '';
-        try {
-          tok = tok || localStorage.getItem('xmst') || '';
-        } catch {}
-        finalUrl = tok
-          ? finalUrl.replace('{{msToken}}', encodeURIComponent(decodeURIComponent(tok)))
-          : finalUrl.replace(/[?&]msToken=\{\{msToken\}\}/, '');
-      }
-      if (o.transport === 'fetch') {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 15000);
-        try {
-          const r = await fetch(finalUrl, {
-            method: o.method,
-            credentials: 'include',
-            headers: o.contentType ? { 'Content-Type': o.contentType } : {},
-            body: o.method === 'GET' ? undefined : o.body || undefined,
-            signal: ctrl.signal,
+function loadProfileCacheFromDisk() {
+  try {
+    if (!fs.existsSync(CONFIG.ttProfilesPath)) return;
+    const raw = JSON.parse(fs.readFileSync(CONFIG.ttProfilesPath, 'utf8'));
+    if (raw && typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw)) {
+        if (v && (v.userId || v.secUid)) {
+          tiktokProfileCache.set(k.toLowerCase(), {
+            userId: String(v.userId ? v.userId : ''),
+            secUid: String(v.secUid ? v.secUid : ''),
+            at: Number(v.at) || Date.now(),
           });
-          return { status: r.status, text: await r.text() };
-        } catch (e) {
-          return { status: 0, text: '', error: String(e && e.message) };
-        } finally {
-          clearTimeout(timer);
         }
       }
-      return await new Promise((resolve) => {
-        const x = new XMLHttpRequest();
-        x.open(o.method, finalUrl, true);
-        x.withCredentials = true;
-        if (o.contentType) x.setRequestHeader('Content-Type', o.contentType);
-        x.timeout = 15000;
-        x.onload = () => resolve({ status: x.status, text: x.responseText || '' });
-        x.onerror = () => resolve({ status: 0, text: '', error: 'network error' });
-        x.ontimeout = () => resolve({ status: 0, text: '', error: 'timeout' });
-        x.send(o.body);
-      });
-    },
-    { method, url, body, contentType, transport }
-  );
+    }
+  } catch (e) {}
 }
-const pageXhr = (page, opts) => pageRequest(page, { transport: 'xhr', ...opts });
 
-/**
- * Reads a profile's IDs from the profile page's HTML without opening or rendering it
- * (a plain same-site download from the TikTok tab, so it carries the account's login).
- */
-async function pageProfileLookup(page, handle) {
-  return page.evaluate(async (h) => {
+let profileSaveTimer = null;
+function saveProfileCacheToDisk() {
+  clearTimeout(profileSaveTimer);
+  profileSaveTimer = setTimeout(() => {
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 20000);
-      const r = await fetch(`https://www.tiktok.com/@${encodeURIComponent(h)}`, { credentials: 'include', signal: ctrl.signal });
-      const html = await r.text();
-      clearTimeout(timer);
-      const m = /<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/.exec(html);
-      if (!m) return { status: r.status, noData: true };
-      const detail = JSON.parse(m[1])?.__DEFAULT_SCOPE__?.['webapp.user-detail'];
-      const u = detail?.userInfo?.user;
-      return { status: r.status, statusCode: detail?.statusCode, id: u?.id || '', secUid: u?.secUid || '', nickname: u?.nickname || '', hasDetail: Boolean(detail) };
-    } catch (e) {
-      return { status: 0, error: String(e && e.message) };
-    }
-  }, handle);
+      const obj = {};
+      for (const [k, v] of tiktokProfileCache.entries()) {
+        if (v.userId || v.secUid) obj[k] = v;
+      }
+      fsp.writeFile(CONFIG.ttProfilesPath, JSON.stringify(obj)).catch(() => {});
+    } catch (e) {}
+  }, 1000);
 }
 
-/** Finds a visible element by selector or exact text and clicks it with real mouse events. */
-async function clickTarget(page, { selectors = [], texts = [], within = null, hoverOnly = false }) {
-  const pt = await page
-    .evaluate(
-      (selectors, texts, within) => {
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          const s = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
-        };
-        const roots = within ? [...document.querySelectorAll(within)].filter(visible) : [document];
-        const centre = (el) => {
-          el.scrollIntoView({ block: 'center', inline: 'center' });
-          const r = el.getBoundingClientRect();
-          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        };
-        for (const root of roots) {
-          for (const sel of selectors) {
-            const el = [...root.querySelectorAll(sel)].find(visible);
-            if (el) return centre(el);
-          }
-          if (texts.length) {
-            const want = texts.map((t) => t.toLowerCase());
-            const hits = [...root.querySelectorAll('button,[role="button"],[role="menuitem"],li,a,div,span,p')]
-              .filter((el) => visible(el) && want.includes((el.innerText || '').trim().toLowerCase()))
-              .sort((a, b) => {
-                const ra = a.getBoundingClientRect();
-                const rb = b.getBoundingClientRect();
-                return ra.width * ra.height - rb.width * rb.height;
-              });
-            if (hits.length) return centre(hits[0]);
-          }
-        }
-        return null;
-      },
-      selectors,
-      texts,
-      within
-    )
-    .catch(() => null);
-  if (!pt) return false;
-  await page.mouse.move(pt.x, pt.y, { steps: 4 });
-  if (!hoverOnly) await page.mouse.click(pt.x, pt.y, { delay: 40 });
-  return true;
+function cacheTikTokProfile(uniqueId, userId, secUid) {
+  const key = normalizeTikTokHandle(uniqueId).toLowerCase();
+  if (!key || key.length < 2) return;
+  const prev = tiktokProfileCache.get(key) || {};
+  const nextUid = toNumericIdString(userId) || prev.userId || '';
+  const nextSec = String(secUid ? secUid : prev.secUid ? prev.secUid : '').trim();
+  if (!nextUid && !nextSec) return;
+
+  tiktokProfileCache.set(key, {
+    userId: nextUid,
+    secUid: nextSec,
+    at: Date.now(),
+  });
+  saveProfileCacheToDisk();
 }
 
-/** Keeps looking for an element until it appears (slow pages), then clicks it. */
-async function waitForClick(page, opts, timeoutMs) {
-  const until = Date.now() + timeoutMs;
-  do {
-    if (await clickTarget(page, opts)) return true;
-    await delay(400);
-  } while (Date.now() < until);
-  return false;
-}
+loadProfileCacheFromDisk();
 
-const BLOCK_WORDS = ['Block', 'Bloquear', 'Bloquer', 'Blockieren', 'Blocca', 'Blokir', 'Engelle', 'Заблокировать', 'Заблокувати', 'Zablokuj', 'Blokkeren', 'Chặn', 'ブロック', '차단', '屏蔽', '封鎖', 'حظر', 'Blockera', 'Bloker', 'Blokker', 'Blokuj'];
-const UNBLOCK_WORDS = ['Unblock', 'Desbloquear', 'Débloquer', 'Blockierung aufheben', 'Sblocca', 'Buka blokir', 'Engeli kaldır', 'Разблокировать', 'Розблокувати', 'Odblokuj', 'Deblokkeren', 'Bỏ chặn', 'ブロックを解除', '차단 해제', '取消屏蔽', '解除封鎖', 'إلغاء الحظر', 'Avblockera'];
-const MORE_SELECTORS = [
-  '[data-e2e="user-more"]',
-  '[data-e2e="user-more-btn"]',
-  '[data-e2e="more-menu-icon"]',
-  'button[aria-label="Actions"]',
-  'button[aria-label*="more" i]',
-  'div[aria-label*="more" i][role="button"]',
-];
-
-const isBlockRequest = (req) => {
-  if (req.method() === 'GET' || req.method() === 'OPTIONS') return false;
-  try {
-    const u = new URL(req.url());
-    return /tiktok/i.test(u.hostname) && /block/i.test(u.pathname) && !/unblock|block_?list/i.test(u.pathname);
-  } catch {
-    return false;
-  }
-};
-
-function learnTemplate(req, ids) {
-  const u = new URL(req.url());
-  for (const k of ['X-Bogus', 'X-Gnarly', '_signature', 'X-Argus', 'X-Ladon']) u.searchParams.delete(k);
-  if (u.searchParams.has('msToken')) u.searchParams.set('msToken', '__MSTOKEN__');
-  const swap = (s) => {
-    let out = String(s || '');
-    for (const [val, tag] of [
-      [ids.secUid, '{{sec}}'],
-      [ids.userId, '{{uid}}'],
-    ]) {
-      if (!val) continue;
-      out = out.split(val).join(tag).split(encodeURIComponent(val)).join(tag);
-    }
-    return out;
-  };
-  const url = swap(u.toString()).replace('__MSTOKEN__', '{{msToken}}');
-  const headers = req.headers();
-  return {
-    url,
-    body: swap(req.postData() || ''),
-    contentType: headers['content-type'] || null,
-    transport: req.resourceType() === 'xhr' ? 'xhr' : 'fetch',
-    learnedAt: Date.now(),
-    failures: 0,
-  };
-}
-
-/** What the dashboard may keep: the request shape only (no cookies, no signatures). */
-function publicTemplate(t) {
-  if (!t) return null;
-  return { url: t.url, body: t.body || '', contentType: t.contentType || null, transport: t.transport || 'fetch', source: t.source || '' };
-}
-
-/** Accepts a request shape the dashboard saved earlier, if it looks like a TikTok block request. */
-function acceptSavedTemplate(t) {
-  if (!t || typeof t !== 'object' || typeof t.url !== 'string' || t.url.length > 4000) return null;
-  let u;
-  try {
-    u = new URL(t.url.replace(/\{\{\w+\}\}/g, 'x'));
-  } catch {
-    return null;
-  }
-  const body = typeof t.body === 'string' ? t.body.slice(0, 4000) : '';
-  if (u.protocol !== 'https:' || !/(^|\.)tiktok\.com$/i.test(u.hostname) || !/block/i.test(u.pathname) || /unblock/i.test(u.pathname)) return null;
-  if (!/\{\{(uid|sec)\}\}/.test(t.url + body)) return null;
-  return {
-    url: t.url,
-    body,
-    contentType: typeof t.contentType === 'string' ? t.contentType.slice(0, 120) : null,
-    transport: t.transport === 'xhr' ? 'xhr' : 'fetch',
-    source: 'saved',
-  };
-}
-
-const classifyTikTokReply = (status, text) => {
-  const j = safeJson(text);
-  const code = j?.status_code ?? j?.statusCode;
-  const msg = j?.status_msg || j?.statusMsg || j?.message || '';
-  if (code === 0) return { ok: true };
-  if (/frequen|too many|limit|try again later|slow down/i.test(msg)) return { ok: false, code: 'rate_limited', note: `TikTok rate limit: ${msg}` };
-  if (!text) return { ok: false, code: 'rejected', note: `TikTok returned an empty reply (HTTP ${status})` };
-  return { ok: false, code: 'rejected', note: msg ? `TikTok said: ${msg}` : `TikTok code ${code ?? 'unknown'} (HTTP ${status})` };
-};
-
-const DEFAULT_BLOCK_GUESSES = [
-  {
-    url: 'https://www.tiktok.com/api/user/block/?aid=1988&app_language=en&app_name=tiktok_web&channel=tiktok_web&device_platform=web_pc&user_id={{uid}}&sec_user_id={{sec}}&block_type=1&source=3&msToken={{msToken}}',
-    body: '',
-    contentType: null,
-  },
-  {
-    url: 'https://www.tiktok.com/api/user/block/?aid=1988&app_language=en&app_name=tiktok_web&channel=tiktok_web&device_platform=web_pc&msToken={{msToken}}',
-    body: 'user_id={{uid}}&sec_user_id={{sec}}&block_type=1&source=0',
-    contentType: 'application/x-www-form-urlencoded',
-  },
-];
-
-function mutex() {
-  let tail = Promise.resolve();
-  return (fn) => {
-    const run = tail.then(fn, fn);
-    tail = run.catch(() => {});
-    return run;
-  };
-}
-
-// /explore is TikTok's full web app and always has the security script. (A lighter page was
-// tried first before, but it cost a wasted load plus a 20 s wait after every restart.)
-const HOME_CANDIDATES = ['https://www.tiktok.com/explore'];
-
-class TikTokAccount {
-  constructor(session, cookies) {
-    this.session = session;
-    this.cookies = cookies;
-    this.context = null;
-    this.apiPage = null; // stays on tiktok.com; every fast request runs here in parallel
-    this.uiPages = [];
-    this.uiFree = [];
-    this.uiWaiters = [];
-    this.learn = mutex(); // only one worker figures out the block request at a time
-    this.probed = false;
-    this.detailWorks = false;
-    this.transport = 'fetch'; // switches to 'xhr' if that's what TikTok's script signs here
-    this.uiBusy = null; // while the shared tab is on a profile page, API calls wait for it
-    this.me = null;
-    this.ready = false;
+// ============================================================================
+// GLOBAL BLACKLIST (SHARED ACROSS ALL USERS)
+// ============================================================================
+class TikTokBlacklist {
+  constructor(filePath) {
+    this.filePath = filePath;
+    this.usernames = new Set();
+    this.writeChain = Promise.resolve();
   }
 
-  async newPage({ light = false } = {}) {
-    const page = await this.context.newPage();
-    page.__light = light;
-    page.setDefaultNavigationTimeout(CONFIG.browser.navTimeoutMs);
-    await page.setUserAgent(UA);
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    await page.setRequestInterception(true);
-    page.on('request', (r) => {
-      if (r.isInterceptResolutionHandled()) return;
-      const t = r.resourceType();
-      const skip =
-        t === 'image' || t === 'media' || t === 'font' || t === 'manifest' || t === 'texttrack' ||
-        (page.__light && t === 'stylesheet') ||
-        /\.(mp4|webm|m3u8|jpe?g|png|webp|gif|woff2?)(\?|$)/i.test(r.url()) ||
-        /google-analytics|googletagmanager|doubleclick|facebook\.net|analytics\.tiktok\.com|ads\.tiktok\.com/i.test(r.url());
-      if (skip) r.abort().catch(() => {});
-      else r.continue().catch(() => {});
-    });
-    return page;
-  }
-
-  /**
-   * Opens a tiktok.com page so TikTok's own security script is running in the tab (it signs the
-   * block requests). Lighter pages are tried first; the first one that has the script is remembered.
-   */
-  async loadHome(page) {
-    const remembered = templates.data.__home;
-    const skip = new Set(templates.data.__noScript || []);
-    const candidates = [...new Set([remembered, ...HOME_CANDIDATES].filter((u) => u && !skip.has(u)))];
-    for (const url of candidates) {
-      await this.gotoWithRetry(page, url);
-      await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 20000 }).catch(() => {});
-      const signed = await page
-        .waitForFunction(() => !/\[native code\]/.test(XMLHttpRequest.prototype.open.toString()), { timeout: 20000, polling: 500 })
-        .then(() => true)
-        .catch(() => false);
-      if (signed || url === candidates[candidates.length - 1]) {
-        if (signed && templates.data.__home !== url) {
-          templates.data.__home = url;
-          templates.save();
-        }
-        await delay(500);
+  load() {
+    try {
+      if (!fs.existsSync(this.filePath)) {
+        fs.writeFileSync(this.filePath, '');
         return;
       }
-      log.info(`TikTok's security script didn't load on ${url}; trying a fuller page.`);
-      templates.data.__noScript = [...skip, url];
-      templates.save();
-    }
+      const raw = fs.readFileSync(this.filePath, 'utf8');
+      const valid = parseUsernameList(raw);
+      this.usernames = new Set(valid);
+      this.saveToDisk();
+    } catch (e) {}
   }
 
-  async gotoWithRetry(page, url) {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
-        break;
-      } catch (e) {
-        if (attempt < 2 && /timeout/i.test(e.message)) continue;
-        if (/timeout/i.test(e.message)) {
-          throw new EngineError(
-            'slow',
-            `TikTok took more than ${Math.round(CONFIG.browser.navTimeoutMs / 1000)}s to load on the server. Try again — the first load after a restart is the slowest. If it keeps happening, raise NAV_TIMEOUT_MS (e.g. 180000).`
-          );
-        }
-        throw e;
-      }
-    }
+  has(username) {
+    return this.usernames.has(normalizeTikTokHandle(username).toLowerCase());
   }
 
-  /**
-   * Works out which account the cookie belongs to. Checks several places because TikTok moves
-   * this around: the page's own data, the account-info endpoint, and the profile link in the menu.
-   * Returns { info } or { info: null, report } where report says what TikTok actually showed.
-   */
-  async detectLogin(page) {
-    const set = await this.context.cookies('https://www.tiktok.com').catch(() => []);
-    const hasSession = set.some((c) => /^(sessionid|sessionid_ss|sid_tt)$/.test(c.name));
-    if (!hasSession) return { info: null, report: 'The browser refused the cookie value, so check you copied the whole sessionid with nothing extra.' };
-
-    // 1) page data
-    const scope = await readScope(page);
-    const ctxUser = scope?.['webapp.app-context']?.user;
-    if (ctxUser?.uid) {
-      return { info: { uid: String(ctxUser.uid), uniqueId: ctxUser.uniqueId, nickname: ctxUser.nickName, avatar: ctxUser.avatarUri?.[0] || '' } };
-    }
-
-    // 2) account-info endpoint (two common forms)
-    let passportNote = '';
-    for (const url of [
-      'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_name=tiktok_web&device_platform=web_pc',
-      'https://www.tiktok.com/passport/web/user/info/?aid=1459&app_name=tiktok_web',
-    ]) {
-      const r = await pageXhr(page, { url }).catch(() => null);
-      const j = safeJson(r?.text);
-      const d = j?.data;
-      if (d && (d.user_id_str || d.user_id) && !d.error_code) {
-        return { info: { uid: String(d.user_id_str || d.user_id), uniqueId: d.username || d.unique_id || '', nickname: d.screen_name || d.name || '', avatar: d.avatar_url || '' } };
-      }
-      if (!passportNote) {
-        passportNote = j
-          ? `TikTok's account check said: "${d?.description || j.message || d?.error_code || 'no account'}".`
-          : `TikTok's account check gave ${r?.status ? `HTTP ${r.status}` : 'no answer'}${r?.text ? '' : ' (empty reply)'}.`;
+  add(input) {
+    const list = parseUsernameList(input);
+    let added = 0;
+    for (const clean of list) {
+      if (!this.usernames.has(clean)) {
+        this.usernames.add(clean);
+        added++;
       }
     }
+    if (added > 0) this.saveToDisk();
+    return added;
+  }
 
-    // 3) the profile link in TikTok's menu
-    await page
-      .waitForSelector('[data-e2e="profile-icon"], [data-e2e="nav-profile"], [data-e2e="top-login-button"], [data-e2e="nav-login-button"]', { timeout: 12000 })
+  replaceAll(input) {
+    const list = parseUsernameList(input);
+    this.usernames = new Set(list);
+    this.saveToDisk();
+    return this.usernames.size;
+  }
+
+  clear() {
+    this.usernames.clear();
+    this.saveToDisk();
+  }
+
+  saveToDisk() {
+    const arr = Array.from(this.usernames);
+    const content = arr.length ? arr.join('\n') + '\n' : '';
+    this.writeChain = this.writeChain
+      .then(() => fsp.writeFile(this.filePath, content))
       .catch(() => {});
-    const dom = await page
-      .evaluate(() => {
-        const prof = document.querySelector('a[data-e2e="nav-profile"], [data-e2e="profile-icon"]');
-        const link = prof?.closest('a')?.getAttribute('href') || prof?.getAttribute('href') || '';
-        const loginBtn = !!document.querySelector('[data-e2e="top-login-button"], [data-e2e="nav-login-button"]');
-        return { link, loginBtn, title: document.title, url: location.href };
-      })
-      .catch(() => ({ link: '', loginBtn: false, title: '', url: '' }));
-    const handle = /\/@([^/?#]+)/.exec(dom.link)?.[1];
-    if (handle) {
-      // Logged in but TikTok hid the numeric ID; a stable stand-in keeps per-account data apart.
-      const sid = set.find((c) => c.name === 'sessionid' || c.name === 'sessionid_ss')?.value || '';
-      const uid = 'h' + crypto.createHash('sha256').update(sid).digest('hex').slice(0, 15);
-      return { info: { uid, uniqueId: decodeURIComponent(handle), nickname: '', avatar: '' } };
-    }
-
-    const parts = [passportNote];
-    if (dom.loginBtn) parts.push('The page showed a "Log in" button.');
-    if (!scope) parts.push(`The page didn't load TikTok's data (title: "${dom.title || 'blank'}").`);
-    parts.push('Paste the whole cookie string instead of only sessionid (see the steps above). If it still fails, the session may be tied to your region; try a Render region closer to you, like Frankfurt.');
-    return { info: null, report: parts.filter(Boolean).join(' ') };
   }
 
-  async open() {
-    lastBrowserUse = Date.now();
-    const browser = await getBrowser();
-    if (CONFIG.lowMemory) {
-      this.context = browser.defaultBrowserContext();
-      this.sharedContext = true;
-      try {
-        const old = await this.context.cookies();
-        if (old.length) await this.context.deleteCookie(...old);
-      } catch {}
-    } else {
-      this.context = await browser.createBrowserContext();
-    }
-    await this.context.setCookie(
-      ...this.cookies.map((c) => ({ name: c.name, value: c.value, domain: '.tiktok.com', path: '/', secure: true, sameSite: 'None' }))
-    );
-
-    const page = await this.newPage({ light: true });
-    await this.loadHome(page);
-    if (await hasCaptcha(page)) {
-      throw new EngineError('captcha', 'TikTok showed a captcha to the server. Wait a few minutes, or run the server from a home connection.');
-    }
-
-    const { info, report } = await this.detectLogin(page);
-    if (!info) {
-      log.warn(`[${this.session.username}] Login check failed: ${report}`);
-      throw new EngineError('not_logged_in', `TikTok treated the server as logged out. ${report}`);
-    }
-
-    this.me = info;
-    this.apiPage = page;
-    this.ready = true;
-    log.info(`[${this.session.username}] TikTok engine ready as @${info.uniqueId} (${info.uid})`);
-    return info;
+  all() {
+    return Array.from(this.usernames);
   }
-
-  async ensureApiPage() {
-    if (this.apiPage && !this.apiPage.isClosed()) return this.apiPage;
-    this.apiPage = await this.newPage({ light: true });
-    await this.loadHome(this.apiPage);
-    return this.apiPage;
-  }
-
-  async withUiPage(fn) {
-    if (CONFIG.lowMemory) {
-      // One TikTok tab only. Any tiktok.com page keeps signing requests, so it can stay on the
-      // profile afterwards; it just needs TikTok's styling so menus and dialogs behave normally.
-      const page = await this.ensureApiPage();
-      page.__light = false;
-      return fn(page);
-    }
-    let page = this.uiFree.pop();
-    if (!page) {
-      if (this.uiPages.length < CONFIG.block.uiPages) {
-        page = await this.newPage();
-        this.uiPages.push(page);
-      } else {
-        page = await new Promise((res) => this.uiWaiters.push(res));
-        if (!page) throw new EngineError('closed', 'Account disconnected');
-      }
-    }
-    try {
-      return await fn(page);
-    } finally {
-      if (page.isClosed()) this.uiPages = this.uiPages.filter((p) => p !== page);
-      else {
-        const w = this.uiWaiters.shift();
-        if (w) w(page);
-        else this.uiFree.push(page);
-      }
-    }
-  }
-
-  async close() {
-    this.ready = false;
-    const ctx = this.context;
-    const pages = [this.apiPage, ...this.uiPages].filter(Boolean);
-    this.context = null;
-    this.apiPage = null;
-    this.uiPages = [];
-    this.uiFree = [];
-    this.uiWaiters.splice(0).forEach((w) => w(null));
-    if (ctx && this.sharedContext) {
-      for (const p of pages) await p.close().catch(() => {});
-      try {
-        const old = await ctx.cookies();
-        if (old.length) await ctx.deleteCookie(...old);
-      } catch {}
-    } else if (ctx) await ctx.close().catch(() => {});
-  }
-
-  get template() {
-    return templates.data[this.me?.uid] || null;
-  }
-  get fastHealthy() {
-    const t = this.template;
-    return Boolean(t && t.failures < CONFIG.block.apiFailuresBeforeUi);
-  }
-
-  /** Returns ids, or { missing: note } when TikTok says the account doesn't exist, or null if unknown. */
-  /** Runs a request in the TikTok tab; waits out (and retries after) a profile-page step on the shared tab. */
-  async api(opts) {
-    for (let attempt = 1; ; attempt++) {
-      if (this.uiBusy) await this.uiBusy.catch(() => {});
-      const page = await this.ensureApiPage();
-      try {
-        return await pageRequest(page, opts);
-      } catch (e) {
-        if (attempt < 3 && /context was destroyed|detached|navigat|Target closed/i.test(e.message)) {
-          await delay(400);
-          continue;
-        }
-        throw e;
-      }
-    }
-  }
-
-  /** Returns ids, or { missing: note } when TikTok says the account doesn't exist, or null if unknown. */
-  async resolveIds(handle) {
-    const known = knownProfile(handle);
-    if (known) return known;
-
-    // 1) TikTok's user-detail API, signed by the tab. Try the transport that worked last first.
-    const url = `https://www.tiktok.com/api/user/detail/?aid=1988&app_language=en&app_name=tiktok_web&device_platform=web_pc&uniqueId=${encodeURIComponent(handle)}&secUid=&msToken={{msToken}}`;
-    // Skip the API entirely once it has clearly never worked here and the page-text lookup does.
-    const skipApi = !this.detailWorks && (this.detailMisses || 0) >= 3 && this.lookupWorks;
-    const order = skipApi ? [] : this.detailWorks ? [this.transport] : [this.transport, this.transport === 'fetch' ? 'xhr' : 'fetch'];
-    for (const transport of order) {
-      const r = await this.api({ url, transport }).catch(() => null);
-      const j = safeJson(r?.text);
-      const u = j?.userInfo?.user;
-      if (u?.id && u?.secUid) {
-        if (!this.detailWorks) log.info(`[${this.session.username}] User lookups work (${transport}).`);
-        this.detailWorks = true;
-        this.lookupWorks = true;
-        this.transport = transport;
-        rememberProfile(handle, { userId: u.id, secUid: u.secUid, nickname: u.nickname });
-        return knownProfile(handle);
-      }
-      if (this.detailWorks && j && Number(j.statusCode) && !u?.id) {
-        return { missing: `@${handle} doesn't exist or is banned (TikTok code ${j.statusCode})` };
-      }
-    }
-    if (order.length && !this.detailWorks) this.detailMisses = (this.detailMisses || 0) + 1;
-
-    // 2) The profile page's own data, downloaded as text (no rendering, so it's quick even on small servers).
-    if (this.uiBusy) await this.uiBusy.catch(() => {});
-    const page = await this.ensureApiPage();
-    const p = await pageProfileLookup(page, handle).catch(() => null);
-    if (p?.id && p?.secUid) {
-      this.lookupWorks = true;
-      rememberProfile(handle, { userId: p.id, secUid: p.secUid, nickname: p.nickname });
-      return knownProfile(handle);
-    }
-    if (p?.hasDetail && Number(p.statusCode) !== 0 && !p.id) {
-      return { missing: `@${handle} doesn't exist or is banned (TikTok code ${p.statusCode})` };
-    }
-    if (!this.lookupWarned) {
-      this.lookupWarned = true;
-      log.warn(`[${this.session.username}] Couldn't look up @${handle} cheaply (profile download: ${p?.status ?? 'no answer'}${p?.noData ? ', no data in page' : ''}${p?.error ? `, ${p.error}` : ''}).`);
-    }
-    return null;
-  }
-
-  async sendBlock(tpl, ids) {
-    const fill = (s) => String(s || '').split('{{uid}}').join(ids.userId).split('{{sec}}').join(ids.secUid);
-    const r = await this.api({ method: 'POST', url: fill(tpl.url), body: fill(tpl.body) || null, contentType: tpl.contentType, transport: tpl.transport || 'fetch' });
-    return { ...classifyTikTokReply(r.status, r.text), raw: `HTTP ${r.status} ${String(r.text || r.error || '').slice(0, 140)}` };
-  }
-
-  saveTemplate(tpl) {
-    templates.data[this.me.uid] = { ...tpl, learnedAt: Date.now(), failures: 0 };
-    templates.save();
-    this.session.broadcast({ type: 'TEMPLATE', template: publicTemplate(templates.data[this.me.uid]) });
-  }
-
-  /** Tries the usual TikTok block request (both ways of sending) so no profile page is needed. */
-  async probeGuesses(ids) {
-    for (const g of DEFAULT_BLOCK_GUESSES) {
-      for (const transport of [this.transport, this.transport === 'fetch' ? 'xhr' : 'fetch']) {
-        const r = await this.sendBlock({ ...g, transport }, ids);
-        if (r.ok) {
-          this.saveTemplate({ ...g, transport, source: 'guess' });
-          log.info(`[${this.session.username}] Direct block request works (${transport}) — no profile page needed.`);
-          return { ...r, vector: 'fast' };
-        }
-        if (r.code === 'rate_limited') return { ...r, vector: 'fast' };
-        log.info(`[${this.session.username}] Direct block attempt not accepted (${transport}): ${r.raw}`);
-      }
-    }
-    return null;
-  }
-
-  async blockViaUi(page, handle) {
-    const step = (t) => this.session.step(t);
-    step(`Opening @${handle}'s profile (first block only; slow on small servers)…`);
-    await page.goto(`https://www.tiktok.com/@${encodeURIComponent(handle)}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__', { timeout: 20000 }).catch(() => {});
-    if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
-
-    const detail = (await readScope(page))?.['webapp.user-detail'];
-    const user = detail?.userInfo?.user;
-    const ids = user?.id ? { userId: String(user.id), secUid: String(user.secUid || '') } : null;
-    if (ids) rememberProfile(handle, { ...ids, nickname: user.nickname });
-    if (!ids && detail && Number(detail.statusCode) !== 0) {
-      return { ok: false, code: 'not_found', note: `@${handle} doesn't exist or is banned (TikTok code ${detail.statusCode})` };
-    }
-
-    step("Waiting for TikTok's profile page to finish loading…");
-    // On slow servers TikTok's buttons exist long before they respond to clicks. Wait until the
-    // page has finished wiring them up (React attaches its handlers to the element).
-    await page
-      .waitForFunction(
-        (sels) => {
-          const el = sels.map((s) => document.querySelector(s)).find(Boolean);
-          return el && Object.keys(el).some((k) => k.startsWith('__reactProps') || k.startsWith('__reactFiber'));
-        },
-        { timeout: CONFIG.block.uiReadyTimeoutMs, polling: 500 },
-        [...MORE_SELECTORS, '[data-e2e="follow-button"]']
-      )
-      .catch(() => {});
-
-    if (await clickTarget(page, { texts: UNBLOCK_WORDS, hoverOnly: true })) return { ok: true, already: true, ids };
-
-    // Watch every write request TikTok makes after we click, so a failure can say what happened.
-    const seen = [];
-    const onReq = (r) => {
-      if (r.method() === 'GET' || r.method() === 'OPTIONS') return;
-      try {
-        const u = new URL(r.url());
-        if (/tiktok/i.test(u.hostname) && !/log|monitor|slardar|mcs|mon\./i.test(u.hostname + u.pathname)) seen.push(u.pathname);
-      } catch {}
-    };
-    page.on('request', onReq);
-    const responseP = page
-      .waitForResponse((r) => isBlockRequest(r.request()), { timeout: CONFIG.block.uiResponseTimeoutMs })
-      .catch(() => null);
-
-    try {
-      step('Opening the … menu…');
-      // Open the "…" menu and wait for the Block item to show up.
-      if (!(await waitForClick(page, { selectors: MORE_SELECTORS, hoverOnly: true }, 8000))) {
-        return { ok: false, code: 'ui_changed', note: "Couldn't find the … menu on the profile page", ids };
-      }
-      let clickedMenu = await waitForClick(page, { texts: BLOCK_WORDS }, 6000);
-      if (!clickedMenu) {
-        await clickTarget(page, { selectors: MORE_SELECTORS });
-        clickedMenu = await waitForClick(page, { texts: BLOCK_WORDS }, 8000);
-      }
-      if (!clickedMenu) return { ok: false, code: 'ui_changed', note: "Couldn't find Block in the profile menu", ids };
-
-      step('Confirming Block…');
-      // Wait for the confirmation box, then press its Block button.
-      const confirmed = await waitForClick(
-        page,
-        { texts: BLOCK_WORDS, within: '[role="dialog"], [class*="Modal"], [class*="modal"], [class*="Dialog"]' },
-        CONFIG.block.uiDialogTimeoutMs
-      );
-      if (!confirmed) await clickTarget(page, { texts: BLOCK_WORDS });
-
-      step("Waiting for TikTok's answer…");
-      // The request goes out right after confirming, so don't wait long once that's done.
-      const resp = await Promise.race([responseP, delay(CONFIG.block.uiAfterConfirmMs).then(() => null)]);
-      if (!resp) {
-        if (await hasCaptcha(page)) return { ok: false, code: 'captcha', note: 'TikTok asked for a captcha' };
-        // The block may have gone through even though we didn't see the request (TikTok can send it from a worker).
-        if (await waitForClick(page, { texts: UNBLOCK_WORDS, hoverOnly: true }, 4000)) {
-          log.warn(`[${this.session.username}] @${handle} blocked, but TikTok's block request wasn't visible, so fast mode couldn't be learned from it.`);
-          return { ok: true, ids };
-        }
-        const sent = [...new Set(seen)].slice(0, 4);
-        return {
-          ok: false,
-          code: 'no_response',
-          note: `Pressed Block${confirmed ? ' and confirmed' : ' (no confirmation box appeared)'}, but TikTok sent no block request${sent.length ? `. Requests seen: ${sent.join(', ')}` : ''}`,
-          ids,
-        };
-      }
-      const verdict = classifyTikTokReply(resp.status(), await resp.text().catch(() => ''));
-      if (verdict.ok && ids?.userId && ids?.secUid) {
-        this.saveTemplate({ ...learnTemplate(resp.request(), ids), source: 'profile' });
-        log.info(`[${this.session.username}] Learned TikTok's block request (${new URL(resp.url()).pathname}) — fast mode on.`);
-        step('Learned it. Blocking the rest in fast mode…');
-      }
-      return { ...verdict, ids };
-    } finally {
-      page.off('request', onReq);
-    }
-  }
-
-  async uiBlock(handle) {
-    let release = () => {};
-    if (CONFIG.lowMemory) {
-      // The single tab is about to leave its page: make API calls wait until it's done.
-      const prev = this.uiBusy;
-      const gate = new Promise((r) => (release = r));
-      this.uiBusy = gate;
-      if (prev) await prev.catch(() => {});
-      release = ((done) => () => {
-        done();
-        if (this.uiBusy === gate) this.uiBusy = null;
-      })(release);
-    }
-    try {
-      const r = await this.withUiPage((page) => this.blockViaUi(page, handle));
-      return { ...r, vector: r.already ? 'already' : 'profile' };
-    } finally {
-      release();
-    }
-  }
-
-
-  async block(handle) {
-    lastBrowserUse = Date.now();
-    // Lookups run in parallel for every worker; they're cheap requests, not page loads.
-    const ids = await this.resolveIds(handle);
-    if (ids?.missing) return { ok: false, code: 'not_found', note: ids.missing, vector: 'lookup' };
-
-    if (this.fastHealthy) {
-      if (ids) {
-        const r = await this.sendBlock(this.template, ids);
-        if (r.ok || r.code === 'rate_limited') {
-          if (r.ok && this.template.failures) ((this.template.failures = 0), templates.save());
-          return { ...r, vector: 'fast', ids };
-        }
-        this.template.failures++;
-        templates.save();
-        if (this.fastHealthy) return { ...r, vector: 'fast', ids };
-      } else if (this.lookupWorks) {
-        // Lookups work in general, so this one account is the problem (private, renamed, deleted…).
-        return { ok: false, code: 'lookup_failed', note: `Couldn't find @${handle}'s account ID`, vector: 'lookup' };
-      } else {
-        return this.uiBlock(handle); // lookups don't work here at all: the profile page is the only way
-      }
-    }
-
-    // The block request isn't known yet. One worker works it out while the rest wait, then all go fast.
-    return this.learn(async () => {
-      if ((this.session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop) {
-        return { ok: false, code: 'stopped', note: this.session.uiStopNote || 'Stopped', vector: 'profile' };
-      }
-      if (ids && this.fastHealthy) {
-        const r = await this.sendBlock(this.template, ids);
-        if (r.ok || r.code === 'rate_limited') return { ...r, vector: 'fast', ids };
-      }
-      if (ids && !this.probed) {
-        this.probed = true;
-        this.session.step('Trying a direct block request…');
-        const r = await this.probeGuesses(ids);
-        if (r) return { ...r, ids };
-      }
-      return this.uiBlock(handle);
-    });
-  }
-
-
 }
 
+const ttBlacklist = new TikTokBlacklist(CONFIG.ttBlacklistPath);
+ttBlacklist.load();
+
 // ============================================================================
-// SESSIONS
+// MULTI-TENANT SESSION MANAGER
 // ============================================================================
 class ClientSession {
-  constructor(id) {
-    this.id = id;
+  constructor(sessionId) {
+    this.sessionId = sessionId;
     this.username = 'Operator';
-    this.cookies = null;
-    this.account = null;
-    this.opening = null;
-    this.auth = { loggedIn: false, accountName: '', nickname: '', avatar: '', autoBlockSharers: false, autoBlockThreshold: CONFIG.share.defaultThreshold, engineError: null };
+    this.auth = {
+      loggedIn: false,
+      cookieHeader: '',
+      ttCookieId: '',
+      ttTargetIdc: 'useast1a',
+      csrfToken: '',
+      msToken: '',
+      accountName: '',
+      autoBlockSharers: false,
+    };
     this.state = { connected: false, username: null, roomId: null, error: null };
-    this.sharers = new Map(); // lowercase handle -> entry
+    this.sharers = new Map();
     this.connection = null;
     this.jobs = new Map();
-    this.queue = [];
-    this.workers = 0;
-    this.pausedUntil = 0;
-    this.strikes = 0;
     this.sseClients = new Set();
-    this.attempts = [];
-    this.lastSeen = Date.now();
-  }
-
-  publicAuth() {
-    const a = this.auth;
-    return {
-      loggedIn: a.loggedIn,
-      accountName: a.accountName,
-      nickname: a.nickname,
-      avatar: a.avatar,
-      autoBlockSharers: a.autoBlockSharers,
-      autoBlockThreshold: a.autoBlockThreshold,
-      engineError: a.engineError,
-      fastMode: Boolean(
-        this.account?.fastHealthy ||
-          (this.lastUid && templates.data[this.lastUid] && templates.data[this.lastUid].failures < CONFIG.block.apiFailuresBeforeUi)
-      ),
-    };
+    this.diagnosticHistory = [];
   }
 
   broadcast(payload) {
@@ -1273,368 +293,584 @@ class ClientSession {
     for (const res of this.sseClients) {
       try {
         res.write(msg);
-      } catch {
+      } catch (e) {
         this.sseClients.delete(res);
       }
     }
   }
 
-  step(text) {
-    this.currentStep = text;
-    this.broadcast({ type: 'STEP', step: text });
-    log.info(`[${this.username}] ${text}`);
-  }
-
-  recordAttempt(entry) {
-    const item = { id: crypto.randomUUID(), timestamp: ts(), ...entry };
-    this.attempts.push(item);
-    if (this.attempts.length > 300) this.attempts.shift();
-    this.broadcast({ type: 'ATTEMPT', attempt: item });
+  recordDiagnostic(entry) {
+    const item = {
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      ...entry,
+    };
+    this.diagnosticHistory.push(item);
+    if (this.diagnosticHistory.length > 250) this.diagnosticHistory.shift();
     return item;
-  }
-
-  async ensureAccount() {
-    if (this.account?.ready) return this.account;
-    if (!this.cookies) return null;
-    if (this.opening) return this.opening;
-    this.opening = (async () => {
-      if (this.account) await this.account.close();
-      const acc = new TikTokAccount(this, this.cookies);
-      try {
-        const me = await acc.open();
-        this.account = acc;
-        this.lastUid = me.uid;
-        Object.assign(this.auth, { loggedIn: true, accountName: me.uniqueId || '', nickname: me.nickname || '', avatar: me.avatar || '', engineError: null });
-        return acc;
-      } catch (err) {
-        const e = err instanceof EngineError ? err : new EngineError('network', `Couldn't open tiktok.com from the server: ${String(err.message).split('\n')[0]}`);
-        await acc.close();
-        this.account = null;
-        this.auth.engineError = e.message;
-        if (e.code === 'not_logged_in') {
-          this.auth.loggedIn = false;
-          this.cookies = null;
-        }
-        throw e;
-      } finally {
-        this.opening = null;
-        this.broadcast({ type: 'AUTH', auth: this.publicAuth() });
-      }
-    })();
-    return this.opening;
   }
 }
 
 const sessions = new Map();
 function getSession(id) {
   if (!sessions.has(id)) sessions.set(id, new ClientSession(id));
-  const s = sessions.get(id);
-  s.lastSeen = Date.now();
-  return s;
+  return sessions.get(id);
 }
 
-function broadcastBlacklist() {
-  const list = blacklist.all();
-  for (const s of sessions.values()) {
-    for (const [h, e] of s.sharers) e.blacklisted = blacklist.has(h);
-    s.broadcast({ type: 'BLACKLIST', blacklist: list });
+function broadcastGlobalBlacklist() {
+  const list = ttBlacklist.all();
+  for (const session of sessions.values()) {
+    for (const [uid, entry] of session.sharers.entries()) {
+      entry.blacklisted = ttBlacklist.has(uid);
+    }
+    session.broadcast({ type: 'BLACKLIST', blacklist: list });
   }
 }
 
 // ============================================================================
-// BLOCK QUEUE
-// ============================================================================
-function publicJob(j) {
-  const { _timer, ...rest } = j;
-  return rest;
-}
-
-function pushJob(session, job, force = false) {
-  if (force || job.status !== 'running') {
-    clearTimeout(job._timer);
-    job._timer = null;
-    session.broadcast({ type: 'JOB', job: publicJob(job) });
-    return;
-  }
-  if (job._timer) return;
-  job._timer = setTimeout(() => {
-    job._timer = null;
-    session.broadcast({ type: 'JOB', job: publicJob(job) });
-  }, 120);
-}
-
-function createJob(session, handles, kind = 'manual') {
-  const job = {
-    id: crypto.randomUUID(),
-    kind,
-    status: 'running',
-    total: handles.length,
-    processed: 0,
-    blockedOnTikTokCount: 0,
-    alreadyCount: 0,
-    failedCount: 0,
-    cancelledCount: 0,
-    currentUsername: null,
-    lastNote: null,
-    startedAt: Date.now(),
-    finishedAt: null,
-    cancelRequested: false,
-    _timer: null,
-  };
-  session.uiFails = 0;
-  session.uiStopNote = null;
-  session.jobs.set(job.id, job);
-  if (session.jobs.size > 50) session.jobs.delete(session.jobs.keys().next().value);
-
-  const uid = session.account?.me?.uid || session.lastUid;
-  for (const h of handles) {
-    if (isInLedger(uid, h)) {
-      job.processed++;
-      job.alreadyCount++;
-    } else session.queue.push({ handle: h, job });
-  }
-  finishJobIfDone(session, job);
-  pushJob(session, job, true);
-  ensureWorkers(session);
-  return job;
-}
-
-function finishJobIfDone(session, job) {
-  if (job.status !== 'running') return;
-  if (job.processed + job.cancelledCount >= job.total) {
-    if (session.currentStep) session.step('');
-    job.status = job.cancelRequested ? 'cancelled' : 'done';
-    job.currentUsername = null;
-    job.finishedAt = Date.now();
-  }
-}
-
-function failQueue(session, note) {
-  const touched = new Set();
-  for (const it of session.queue.splice(0)) {
-    it.job.processed++;
-    it.job.failedCount++;
-    it.job.lastNote = note;
-    finishJobIfDone(session, it.job);
-    touched.add(it.job);
-  }
-  touched.forEach((j) => pushJob(session, j, true));
-}
-
-function ensureWorkers(session) {
-  if (!session.queue.length) return;
-  if (!session.cookies) return failQueue(session, 'Connect your TikTok account first');
-  const want = Math.min(CONFIG.block.concurrency, session.queue.length);
-  while (session.workers < want) {
-    const lane = session.workers++;
-    runWorker(session, lane)
-      .catch((e) => log.error('Worker crashed:', e))
-      .finally(() => {
-        session.workers--;
-        if (session.queue.length && session.cookies && !session.opening) setTimeout(() => ensureWorkers(session), 300);
-      });
-  }
-}
-
-async function runWorker(session, lane) {
-  let account;
-  try {
-    account = await session.ensureAccount();
-  } catch (e) {
-    failQueue(session, e.message);
-    return;
-  }
-  if (!account) return;
-  if (lane) await delay(lane * CONFIG.block.staggerMs);
-
-  while (session.queue.length && account.ready) {
-    const wait = session.pausedUntil - Date.now();
-    if (wait > 0) await delay(wait);
-    const item = session.queue.shift();
-    if (!item) break;
-    const { handle, job } = item;
-    if (job.cancelRequested) {
-      job.cancelledCount++;
-      finishJobIfDone(session, job);
-      pushJob(session, job);
-      continue;
-    }
-    job.currentUsername = handle;
-    pushJob(session, job);
-
-    const started = Date.now();
-    let result;
-    try {
-      result = await account.block(handle);
-    } catch (e) {
-      result = { ok: false, code: 'error', note: String(e.message).split('\n')[0], vector: 'error' };
-      if (/Target closed|Session closed|detached|Execution context was destroyed/i.test(e.message)) {
-        session.queue.unshift(item); // page died mid-request; retry this user once the page is back
-        await delay(500);
-        continue;
-      }
-    }
-
-    if (result.code === 'captcha' || result.code === 'rate_limited') {
-      session.strikes++;
-      if (session.strikes >= CONFIG.block.maxStrikes) {
-        session.strikes = 0;
-        job.processed++;
-        job.failedCount++;
-        job.lastNote = result.note;
-        session.recordAttempt({ username: handle, userId: result.ids?.userId || '', success: false, vector: result.vector, note: result.note, elapsedMs: Date.now() - started });
-        finishJobIfDone(session, job);
-        pushJob(session, job, true);
-        failQueue(session, `${result.note}. Stopped — try again in a few minutes.`);
-        break;
-      }
-      session.pausedUntil = Date.now() + CONFIG.block.pauseOnLimitMs;
-      job.lastNote = `${result.note}. Pausing ${Math.round(CONFIG.block.pauseOnLimitMs / 1000)}s`;
-      session.queue.unshift(item);
-      pushJob(session, job, true);
-      continue;
-    }
-    session.strikes = 0;
-
-    if (result.code === 'ui_changed' || result.code === 'no_response') {
-      session.uiFails = (session.uiFails || 0) + 1;
-    } else if (result.ok) session.uiFails = 0;
-
-    job.processed++;
-    if (result.ok) {
-      addToLedger(account.me.uid, handle);
-      if (result.already) job.alreadyCount++;
-      else job.blockedOnTikTokCount++;
-    } else {
-      job.failedCount++;
-      job.lastNote = result.note;
-    }
-    if (result.code !== 'stopped') session.recordAttempt({
-      username: handle,
-      userId: result.ids?.userId || knownProfile(handle)?.userId || '',
-      success: Boolean(result.ok),
-      vector: result.vector,
-      note: result.ok ? (result.already ? 'Already blocked' : 'Blocked') : result.note,
-      elapsedMs: Date.now() - started,
-    });
-    finishJobIfDone(session, job);
-    pushJob(session, job);
-    if ((session.uiFails || 0) >= CONFIG.block.uiFailuresBeforeStop && !account.fastHealthy && result.code !== 'stopped') {
-      session.uiStopNote = `Stopped: TikTok's Block button didn't work ${CONFIG.block.uiFailuresBeforeStop} times in a row. Last problem: ${result.note}`;
-      failQueue(session, session.uiStopNote);
-      break;
-    }
-    if (result.ok && result.vector !== 'fast' && account.fastHealthy) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
-    if (result.ok && result.vector === 'fast' && job.blockedOnTikTokCount === 1) session.broadcast({ type: 'AUTH', auth: session.publicAuth() });
-  }
-}
-
-// ============================================================================
-// LIVE SHARE LISTENER
+// TIKTOK RESOLVERS & RATE-GATED TIKWM LOOKUP
 // ============================================================================
 let tiktokLib = null;
-const getTikTokLib = async () => (tiktokLib ||= await import('tiktok-live-connector'));
+async function getTikTokLib() {
+  if (!tiktokLib) tiktokLib = await import('tiktok-live-connector');
+  return tiktokLib;
+}
 
-function isSharePacket(data) {
+function singleFlight() {
+  const inflight = new Map();
+  return function run(key, fn) {
+    const hit = inflight.get(key);
+    if (hit) return hit;
+    const p = Promise.resolve()
+      .then(fn)
+      .finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  };
+}
+const ttResolveFlight = singleFlight();
+
+// Paces tikwm.com calls to 1 request per 1.15s so tikwm never rate-limits
+let nextTikwmSlotAt = 0;
+async function acquireTikwmSlot() {
+  const now = Date.now();
+  const scheduled = Math.max(now, nextTikwmSlotAt);
+  nextTikwmSlotAt = scheduled + CONFIG.tiktok.tikwmMinIntervalMs;
+  const waitMs = scheduled - now;
+  if (waitMs > 0) await delay(waitMs);
+}
+
+async function buildTikTokCookieHeader(rawInput) {
+  const trimmed = String(rawInput ? rawInput : '').trim();
+  if (!trimmed) {
+    return { cookieHeader: '', ttCookieId: '', ttTargetIdc: 'useast1a', csrfToken: '', msToken: '' };
+  }
+
+  let ttCookieId = '';
+  let ttTargetIdc = 'useast1a';
+  let cookieHeader = '';
+  let csrfToken = '';
+  let msToken = '';
+
+  if (trimmed.includes('=')) {
+    const m =
+      /sessionid=([^;\s]+)/i.exec(trimmed) ||
+      /sessionid_ss=([^;\s]+)/i.exec(trimmed) ||
+      /sid_tt=([^;\s]+)/i.exec(trimmed);
+    ttCookieId = m ? m[1] : '';
+    const idcMatch = /tt-target-idc=([^;\s]+)/i.exec(trimmed);
+    if (idcMatch) ttTargetIdc = idcMatch[1];
+    const cm = /(?:tt_csrf_token|csrf_session_id|passport_csrf_token)=([^;\s]+)/i.exec(trimmed);
+    if (cm) csrfToken = cm[1];
+    const mm = /msToken=([^;\s]+)/i.exec(trimmed);
+    if (mm) msToken = mm[1];
+    cookieHeader = trimmed;
+  } else {
+    ttCookieId = trimmed;
+    cookieHeader = `sessionid=${trimmed}; sessionid_ss=${trimmed}; sid_tt=${trimmed}`;
+  }
+
+  try {
+    const res = await tiktokHttp.get('https://www.tiktok.com/explore', {
+      headers: { Cookie: cookieHeader },
+      timeout: 6000,
+    });
+    for (const sc of res.headers?.['set-cookie'] || []) {
+      const cMatch = /(?:tt_csrf_token|passport_csrf_token)=([^;]+)/i.exec(sc);
+      if (cMatch && !csrfToken) csrfToken = cMatch[1];
+      const mMatch = /msToken=([^;]+)/i.exec(sc);
+      if (mMatch && !msToken) msToken = mMatch[1];
+      const idcMatch = /tt-target-idc=([^;]+)/i.exec(sc);
+      if (idcMatch) ttTargetIdc = idcMatch[1];
+    }
+  } catch (e) {}
+
+  if (!csrfToken) {
+    csrfToken = crypto.randomBytes(16).toString('hex');
+  }
+  if (!cookieHeader.includes('tt_csrf_token=')) {
+    cookieHeader += `; tt_csrf_token=${csrfToken}; passport_csrf_token=${csrfToken}`;
+  }
+  if (msToken && !cookieHeader.includes('msToken=')) {
+    cookieHeader += `; msToken=${msToken}`;
+  }
+
+  return { cookieHeader, ttCookieId, ttTargetIdc, csrfToken, msToken };
+}
+
+function isSocialSharePacket(data) {
   if (!data || typeof data !== 'object') return false;
-  if (String(data.action ?? '') === '3') return true;
-  const key = String(data.common?.displayText?.key || data.displayType || '').toLowerCase();
-  return key.includes('share');
+  const rawAction = data.action?.low ?? data.action;
+  if (Number(rawAction) === 3 || String(rawAction) === '3') return true;
+  const displayType = String(
+    data.displayType ||
+      data.common?.displayText?.key ||
+      data.common?.displayText?.defaultPattern ||
+      data.label ||
+      ''
+  ).toLowerCase();
+  return displayType.includes('share');
 }
 
 function extractShareUser(data) {
-  const u = data?.user || {};
-  const handle = normalizeHandle(u.uniqueId || u.displayId || u.username || '');
-  return {
-    uniqueId: handle,
-    displayHandle: String(u.uniqueId || u.displayId || handle).replace(/^@+/, ''),
-    nickname: String(u.nickname || u.nickName || handle).trim(),
-    userId: String(u.userId || u.id || u.idStr || '').replace(/\D/g, ''),
-    secUid: String(u.secUid || u.sec_uid || '').trim(),
-    profilePictureUrl:
-      u.profilePictureUrl || u.avatarThumb?.urlList?.[0] || u.avatarThumb?.url?.[0] || u.profilePicture?.urls?.[0] || u.profilePicture?.url?.[0] || '',
-  };
+  const pieceUser = data?.common?.displayText?.pieces?.find((p) => p?.userValue?.user)?.userValue?.user;
+  const u = data?.user || data?.userDetails || pieceUser || data || {};
+  const uniqueId = normalizeTikTokHandle(u.uniqueId || u.displayId || u.username || data?.uniqueId || '');
+  const nickname = String(u.nickname || u.nickName || data?.nickname || uniqueId).trim();
+  const userId =
+    toNumericIdString(u.userId) ||
+    toNumericIdString(u.id) ||
+    toNumericIdString(u.idStr) ||
+    toNumericIdString(pieceUser?.id) ||
+    toNumericIdString(data?.userId);
+  const secUid = String(u.secUid || u.sec_uid || pieceUser?.secUid || data?.secUid || '').trim();
+  const pfp =
+    u.profilePictureUrl ||
+    u.profilePicture?.urls?.[0] ||
+    u.avatarThumb?.urlList?.[0] ||
+    data?.profilePictureUrl ||
+    'https://tr.rbxcdn.com/53eb9b17fe1432a809c73a13889b5006/150/150/AvatarHeadshot/Png';
+  return { uniqueId, nickname, userId, secUid, profilePictureUrl: pfp };
 }
 
-function recordSharer(session, data) {
-  const p = extractShareUser(data);
-  if (!isValidHandle(p.uniqueId)) return;
-  if (p.userId || p.secUid) rememberProfile(p.uniqueId, p);
+async function resolveTikTokUserProfile(session, uniqueId) {
+  const clean = normalizeTikTokHandle(uniqueId).toLowerCase();
+  if (!clean || clean.length < 2) return { userId: '', secUid: '' };
 
-  const prev = session.sharers.get(p.uniqueId);
-  if (prev && Date.now() - prev.timestamp < CONFIG.share.dedupWindowMs) return;
-
-  const entry = {
-    uniqueId: p.uniqueId,
-    displayHandle: p.displayHandle,
-    nickname: p.nickname,
-    userId: p.userId || prev?.userId || '',
-    profilePictureUrl: p.profilePictureUrl || prev?.profilePictureUrl || '',
-    shareCount: (prev?.shareCount || 0) + 1,
-    firstSharedAt: prev?.firstSharedAt || Date.now(),
-    timestamp: Date.now(),
-    blacklisted: blacklist.has(p.uniqueId),
-  };
-  session.sharers.set(p.uniqueId, entry);
-
-  if (session.auth.autoBlockSharers && entry.shareCount >= session.auth.autoBlockThreshold && !entry.blacklisted) {
-    blacklist.add([p.uniqueId]);
-    entry.blacklisted = true;
-    broadcastBlacklist();
-    if (session.cookies) createJob(session, [p.uniqueId], 'auto');
+  const cached = tiktokProfileCache.get(clean);
+  if (cached && /^\d+$/.test(cached.userId) && cached.secUid) {
+    return { userId: cached.userId, secUid: cached.secUid };
   }
-  session.broadcast({ type: 'SHARE', user: entry });
+
+  if (session) {
+    for (const [k, v] of session.sharers.entries()) {
+      if (k.toLowerCase() === clean && /^\d+$/.test(v.userId) && v.secUid) {
+        cacheTikTokProfile(clean, v.userId, v.secUid);
+        return { userId: v.userId, secUid: v.secUid };
+      }
+    }
+  }
+
+  return ttResolveFlight(`tt-resolve:${clean}`, async () => {
+    let foundUserId = cached?.userId || '';
+    let foundSecUid = cached?.secUid || '';
+
+    // Layer 1: TikTok API-Live User Room (Fast, no rate-limit)
+    try {
+      const apiRes = await tiktokHttp.get(
+        `https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId=${encodeURIComponent(clean)}&sourceType=54`,
+        {
+          timeout: 5000,
+          headers: {
+            Referer: `https://www.tiktok.com/@${encodeURIComponent(clean)}/live`,
+            ...(session?.auth?.cookieHeader ? { Cookie: session.auth.cookieHeader } : {}),
+          },
+        }
+      );
+      const u = apiRes.data?.data?.user;
+      if (u) {
+        const uid = toNumericIdString(u.id || u.idStr);
+        const sec = String(u.secUid || '').trim();
+        if (uid) foundUserId = uid;
+        if (sec) foundSecUid = sec;
+        if (foundUserId && foundSecUid) {
+          cacheTikTokProfile(clean, foundUserId, foundSecUid);
+          return { userId: foundUserId, secUid: foundSecUid };
+        }
+      }
+    } catch (e) {}
+
+    // Layer 2: TikTok @username Profile Page HTML Parser (Fast, uses session cookie)
+    try {
+      const resHtml = await tiktokHttp.get(`https://www.tiktok.com/@${encodeURIComponent(clean)}`, {
+        timeout: 6000,
+        headers: {
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          ...(session?.auth?.cookieHeader ? { Cookie: session.auth.cookieHeader } : {}),
+        },
+      });
+      const html = typeof resHtml.data === 'string' ? resHtml.data : '';
+      const scriptMatch = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
+      if (scriptMatch && scriptMatch[1]) {
+        try {
+          const jsonData = JSON.parse(scriptMatch[1]);
+          const userDetail = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo?.user;
+          if (userDetail) {
+            const uid = toNumericIdString(userDetail.id);
+            const sec = String(userDetail.secUid || '').trim();
+            if (uid && !foundUserId) foundUserId = uid;
+            if (sec && !foundSecUid) foundSecUid = sec;
+          }
+        } catch (e) {}
+      }
+
+      if (!foundUserId || !foundSecUid) {
+        const escapedClean = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const r1 = new RegExp(`"id"\\s*:\\s*"(\\d+)"[^}]{0,350}"uniqueId"\\s*:\\s*"${escapedClean}"[^}]{0,650}"secUid"\\s*:\\s*"([^"]+)"`, 'i');
+        const r2 = new RegExp(`"uniqueId"\\s*:\\s*"${escapedClean}"[^}]{0,450}"id"\\s*:\\s*"(\\d+)"[^}]{0,450}"secUid"\\s*:\\s*"([^"]+)"`, 'i');
+        const m = r1.exec(html) || r2.exec(html);
+        if (m) {
+          if (!foundUserId) foundUserId = m[1];
+          if (!foundSecUid) foundSecUid = m[2];
+        }
+      }
+
+      if (foundUserId && foundSecUid) {
+        cacheTikTokProfile(clean, foundUserId, foundSecUid);
+        return { userId: foundUserId, secUid: foundSecUid };
+      }
+    } catch (e) {}
+
+    // Layer 3: Rate-Gated TikWM Public API (1 req / 1.15s with auto-retry on rate-limit)
+    for (let twTry = 1; twTry <= 3; twTry++) {
+      try {
+        await acquireTikwmSlot();
+        const twRes = await tiktokHttp.get(
+          `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(clean)}`,
+          { timeout: 6500, headers: { Accept: 'application/json' } }
+        );
+        if (twRes.data?.code === -1) {
+          // TikWM rate-limit hit; wait and retry
+          await delay(1200 * twTry);
+          continue;
+        }
+        const u = twRes.data?.data?.user;
+        if (u) {
+          const uid = toNumericIdString(u.id);
+          const sec = String(u.secUid || '').trim();
+          if (uid) foundUserId = uid;
+          if (sec) foundSecUid = sec;
+        }
+        break;
+      } catch (e) {}
+    }
+
+    if (foundUserId || foundSecUid) {
+      cacheTikTokProfile(clean, foundUserId, foundSecUid);
+    }
+    return { userId: foundUserId, secUid: foundSecUid };
+  });
+}
+
+async function signTikTokUrlIfPossible(targetUrl) {
+  try {
+    const lib = await getTikTokLib();
+    const TikTokLiveConnection = lib.TikTokLiveConnection || lib.WebcastPushConnection;
+    const tempConn = new TikTokLiveConnection('tiktok', {
+      processInitialData: false,
+      enableExtendedGiftInfo: false,
+      ...(CONFIG.eulerApiKey ? { signApiKey: CONFIG.eulerApiKey } : {}),
+    });
+    if (tempConn?.webClient?.webSigner?.signTiktokUrl) {
+      const signed = await tempConn.webClient.webSigner.signTiktokUrl(targetUrl);
+      return signed?.signedUrl || signed || targetUrl;
+    }
+  } catch (e) {}
+  return targetUrl;
 }
 
 // ============================================================================
-// EXPRESS
+// CORE BLOCKING ENGINE (PROVEN V1 WEB + MOBILE AWEME FALLBACK)
 // ============================================================================
+
+async function blockTikTokUserOnAccount(session, userObj) {
+  const startMs = Date.now();
+  const cleanUsername = normalizeTikTokHandle(userObj?.uniqueId);
+
+  if (!cleanUsername || cleanUsername.length < 2) {
+    return { blockedOnTikTok: false, note: 'Invalid handle' };
+  }
+
+  if (!session.auth.loggedIn || !session.auth.cookieHeader) {
+    return { blockedOnTikTok: false, note: 'Not logged into TikTok Account' };
+  }
+
+  let targetUserId = toNumericIdString(userObj?.userId);
+  let targetSecUid = String(userObj?.secUid || '').trim();
+
+  if (!targetUserId || !targetSecUid) {
+    const resolved = await resolveTikTokUserProfile(session, cleanUsername);
+    if (!targetUserId && resolved.userId) targetUserId = resolved.userId;
+    if (!targetSecUid && resolved.secUid) targetSecUid = resolved.secUid;
+  }
+
+  if (!targetSecUid && !targetUserId) {
+    session.recordDiagnostic({
+      username: cleanUsername,
+      userId: '—',
+      success: false,
+      vector: 'RESOLVE_MISS',
+      note: `Could not resolve @${cleanUsername}`,
+      elapsedMs: Date.now() - startMs,
+    });
+    return { blockedOnTikTok: false, note: `Could not resolve @${cleanUsername}` };
+  }
+
+  const csrfToken = session.auth.csrfToken || crypto.randomBytes(16).toString('hex');
+  const webHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    Accept: 'application/json, text/plain, */*',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Origin: 'https://www.tiktok.com',
+    Referer: `https://www.tiktok.com/@${cleanUsername}`,
+    Cookie: session.auth.cookieHeader,
+    'x-secsdk-csrf-token': csrfToken,
+    'tt-csrf-token': csrfToken,
+    'x-tt-passport-csrf-token': csrfToken,
+  };
+
+  let lastNote = '';
+  for (let attempt = 1; attempt <= CONFIG.tiktok.maxBlockRetries; attempt++) {
+    try {
+      const webQuery = new URLSearchParams({
+        WebIdLastTime: String(Math.floor(Date.now() / 1000)),
+        aid: '1988',
+        app_language: 'en',
+        app_name: 'tiktok_web',
+        browser_language: 'en-US',
+        browser_name: 'Mozilla',
+        browser_online: 'true',
+        browser_platform: 'Win32',
+        browser_version: '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        channel: 'tiktok_web',
+        cookie_enabled: 'true',
+        device_id: '7350000000000000000',
+        device_platform: 'web_pc',
+        focus_state: 'true',
+        from_page: 'user',
+        history_len: '3',
+        is_fullscreen: 'false',
+        is_page_visible: 'true',
+        os: 'windows',
+        priority_region: 'US',
+        referer: '',
+        region: 'US',
+        screen_height: '1080',
+        screen_width: '1920',
+        tz_name: 'UTC',
+        webcast_language: 'en',
+        blockType: '1',
+        block_type: '1',
+        source: '0',
+        ...(targetSecUid
+          ? { secUid: targetSecUid, sec_user_id: targetSecUid, target_sec_uid: targetSecUid }
+          : {}),
+        ...(targetUserId
+          ? { userId: targetUserId, user_id: targetUserId, target_uid: targetUserId }
+          : {}),
+        ...(session.auth.msToken ? { msToken: session.auth.msToken } : {}),
+      });
+
+      const bodyForm = new URLSearchParams({
+        blockType: '1',
+        block_type: '1',
+        source: '0',
+        ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid } : {}),
+        ...(targetUserId ? { userId: targetUserId, user_id: targetUserId } : {}),
+      });
+
+      const unsignedUrl = `https://www.tiktok.com/api/user/block/?${webQuery.toString()}`;
+      const signedUrl = await signTikTokUrlIfPossible(unsignedUrl);
+
+      const res1 = await tiktokHttp.post(signedUrl, bodyForm.toString(), {
+        headers: webHeaders,
+        timeout: CONFIG.tiktok.blockTimeoutMs,
+      });
+
+      log.info(
+        `[TikTok Block V1 Web] @${cleanUsername} (uid=${targetUserId}, sec=${targetSecUid ? 'yes' : 'no'}) -> HTTP ${res1.status}:`,
+        JSON.stringify(res1.data || {}).slice(0, 180)
+      );
+
+      if (
+        res1.status === 200 &&
+        (res1.data?.status_code === 0 ||
+          res1.data?.statusCode === 0 ||
+          res1.data?.block_status === 1 ||
+          res1.data?.data?.block_status === 1)
+      ) {
+        session.recordDiagnostic({
+          username: cleanUsername,
+          userId: targetUserId,
+          success: true,
+          vector: `WEB_V1_TRY_${attempt}`,
+          elapsedMs: Date.now() - startMs,
+        });
+        return { blockedOnTikTok: true };
+      }
+
+      lastNote = res1.data?.status_msg || `code ${res1.data?.status_code ?? res1.status}`;
+      if (String(lastNote).toLowerCase().includes('invalid') || String(lastNote).toLowerCase().includes('param')) {
+        tiktokProfileCache.delete(cleanUsername.toLowerCase());
+        const fresh = await resolveTikTokUserProfile(session, cleanUsername);
+        if (fresh.userId) targetUserId = fresh.userId;
+        if (fresh.secUid) targetSecUid = fresh.secUid;
+      }
+    } catch (err) {
+      lastNote = err.message;
+    }
+
+    await delay(350 * attempt);
+  }
+
+  session.recordDiagnostic({
+    username: cleanUsername,
+    userId: targetUserId,
+    success: false,
+    vector: 'FAILED',
+    note: lastNote,
+    elapsedMs: Date.now() - startMs,
+  });
+  return { blockedOnTikTok: false, note: lastNote };
+}
+
+async function runParallelTikTokBlockBatch(session, usernames) {
+  const cleanList = parseUsernameList(usernames);
+  ttBlacklist.add(cleanList);
+  broadcastGlobalBlacklist();
+
+  let cursor = 0;
+  let blockedOnTikTokCount = 0;
+  let failedCount = 0;
+  let lastNote = null;
+
+  const worker = async (laneIdx) => {
+    if (laneIdx > 0) await delay(laneIdx * CONFIG.tiktok.blockStaggerMs);
+    while (cursor < cleanList.length) {
+      const uname = cleanList[cursor++];
+      if (!uname) continue;
+      const existing = session.sharers.get(uname) || { uniqueId: uname };
+      existing.blacklisted = true;
+      if (session.sharers.has(uname)) session.sharers.set(uname, existing);
+
+      if (session.auth.loggedIn && session.auth.cookieHeader) {
+        try {
+          const result = await blockTikTokUserOnAccount(session, existing);
+          if (result.blockedOnTikTok) blockedOnTikTokCount++;
+          else {
+            failedCount++;
+            if (result.note) lastNote = result.note;
+          }
+        } catch (err) {
+          failedCount++;
+          lastNote = err.message;
+        }
+        await delay(CONFIG.tiktok.blockStaggerMs);
+      } else {
+        failedCount++;
+        lastNote = 'TikTok cookie not connected';
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(CONFIG.tiktok.blockConcurrency, cleanList.length) }, (_, i) => worker(i))
+  );
+  return { totalBlacklisted: cleanList.length, blockedOnTikTokCount, failedCount, lastNote };
+}
+
+function recordTikTokSharer(session, data) {
+  const parsed = extractShareUser(data);
+  if (!parsed.uniqueId || parsed.uniqueId.length < 2) return;
+
+  if (parsed.userId || parsed.secUid) {
+    cacheTikTokProfile(parsed.uniqueId, parsed.userId, parsed.secUid);
+  }
+
+  const existing = session.sharers.get(parsed.uniqueId);
+  if (existing && Date.now() - existing.timestamp < CONFIG.tiktok.shareDedupWindowMs) return;
+
+  const shareCount = existing ? existing.shareCount + 1 : 1;
+  const isBlacklisted = ttBlacklist.has(parsed.uniqueId);
+
+  const userEntry = {
+    uniqueId: parsed.uniqueId,
+    nickname: parsed.nickname,
+    userId: parsed.userId || existing?.userId || '',
+    secUid: parsed.secUid || existing?.secUid || '',
+    profilePictureUrl: parsed.profilePictureUrl,
+    shareCount,
+    lastSharedAt: new Date().toLocaleTimeString(),
+    timestamp: Date.now(),
+    blacklisted: isBlacklisted,
+  };
+  session.sharers.set(parsed.uniqueId, userEntry);
+
+  if (session.auth.autoBlockSharers && shareCount >= 2 && !isBlacklisted) {
+    ttBlacklist.add([parsed.uniqueId]);
+    broadcastGlobalBlacklist();
+    userEntry.blacklisted = true;
+    if (session.auth.loggedIn) {
+      blockTikTokUserOnAccount(session, userEntry).catch(() => {});
+    }
+  } else if (!userEntry.secUid || !userEntry.userId) {
+    resolveTikTokUserProfile(session, parsed.uniqueId)
+      .then((resolved) => {
+        if (resolved.userId && !userEntry.userId) userEntry.userId = resolved.userId;
+        if (resolved.secUid && !userEntry.secUid) userEntry.secUid = resolved.secUid;
+      })
+      .catch(() => {});
+  }
+  session.broadcast({ type: 'SHARE', user: userEntry, totalUnique: session.sharers.size });
+}
+
+// ============================================================================
+// EXPRESS APP & ROUTES
+// ============================================================================
+
 const app = express();
 app.disable('x-powered-by');
 app.use(cors({ origin: CONFIG.corsOrigin }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '4mb' }));
 
 app.get('/', (req, res) => {
   const htmlPath = path.join(__dirname, 'index.html');
   if (fs.existsSync(htmlPath)) return res.sendFile(htmlPath);
-  res.json({ ok: true, service: 'nexus-tiktok' });
+  res.status(200).json({ ok: true, service: 'nexus-tiktok-engine' });
 });
+
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/tiktok')) return next();
+  const sessionId = req.headers['x-session-id'] || req.query.sessionId;
+  if (!sessionId) return res.status(401).json({ error: 'Missing x-session-id header.' });
+
+  req.sessionId = sessionId;
+  req.session = getSession(sessionId);
+  req.session.username = req.headers['x-username'] || req.query.username || 'Operator';
+  next();
+});
+
+const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     uptimeSec: Math.round(process.uptime()),
     activeSessions: sessions.size,
-    globalBlacklisted: blacklist.all().length,
-    knownProfiles: Object.keys(profiles.data).length,
-    browser: browserError ? `error: ${browserError}` : engineStatus.state,
-    browserPath,
+    globalBlacklisted: ttBlacklist.all().length,
+    cachedProfiles: tiktokProfileCache.size,
   });
 });
-
-app.use('/api/tiktok', (req, res, next) => {
-  const sessionId = String(req.headers['x-session-id'] || req.query.sessionId || '').trim();
-  if (!sessionId) return res.status(401).json({ error: 'Missing session ID.' });
-  req.session = getSession(sessionId);
-  req.session.username = String(req.headers['x-username'] || req.query.username || 'Operator').slice(0, 40);
-  next();
-});
-
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
-function snapshot(s) {
-  return {
-    state: s.state,
-    auth: s.publicAuth(),
-    sharers: [...s.sharers.values()],
-    blacklist: blacklist.all(),
-    jobs: [...s.jobs.values()].filter((j) => j.kind === 'manual').slice(-1).map(publicJob),
-    attempts: s.attempts.slice(-60),
-    engine: { ...engineStatus },
-    step: s.currentStep || '',
-    blockRequest: publicTemplate(s.lastUid && templates.data[s.lastUid]),
-  };
-}
 
 app.get('/api/tiktok/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1642,222 +878,330 @@ app.get('/api/tiktok/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
-  const s = req.session;
-  s.sseClients.add(res);
-  res.write(`data: ${JSON.stringify({ type: 'INIT', ...snapshot(s) })}\n\n`);
-  const ping = setInterval(() => {
+
+  req.session.sseClients.add(res);
+
+  res.write(
+    `data: ${JSON.stringify({
+      type: 'INIT',
+      state: req.session.state,
+      auth: {
+        loggedIn: req.session.auth.loggedIn,
+        accountName: req.session.auth.accountName,
+        autoBlockSharers: req.session.auth.autoBlockSharers,
+      },
+      sharers: Array.from(req.session.sharers.values()),
+      blacklist: ttBlacklist.all(),
+    })}\n\n`
+  );
+
+  const keepAlive = setInterval(() => {
     try {
       res.write(': ping\n\n');
-      s.lastSeen = Date.now();
-    } catch {}
+    } catch (e) {}
   }, 15000);
   req.on('close', () => {
-    clearInterval(ping);
-    s.sseClients.delete(res);
+    clearInterval(keepAlive);
+    req.session.sseClients.delete(res);
   });
 });
 
-app.get('/api/tiktok/sharers', (req, res) => res.json(snapshot(req.session)));
-
 app.post(
   '/api/tiktok/login',
-  wrap(async (req, res) => {
-    const s = req.session;
-    const cookies = parseCookieInput(req.body?.cookie);
-    if (!cookies.some((c) => /^(sessionid|sessionid_ss|sid_tt)$/i.test(c.name))) {
-      return res.status(400).json({ error: 'That cookie has no sessionid in it. Paste the full Cookie header from tiktok.com.' });
+  asyncRoute(async (req, res) => {
+    const { cookie, accountName } = req.body || {};
+    const parsed = await buildTikTokCookieHeader(cookie);
+    if (!parsed.cookieHeader) {
+      return res.status(400).json({ error: 'Please paste your TikTok Cookie or sessionid.' });
     }
-    if (CONFIG.lowMemory) {
-      const other = [...sessions.values()].find((x) => x !== s && x.cookies);
-      if (other) {
-        return res.status(409).json({
-          error: `This server runs in low-memory mode, which fits one TikTok account at a time. @${other.auth.accountName || 'another account'} is already connected in another session. Disconnect it there first.`,
-        });
-      }
-    }
-    s.cookies = cookies;
-    if (s.account) {
-      await s.account.close();
-      s.account = null;
-    }
-    try {
-      await s.ensureAccount();
-      const saved = acceptSavedTemplate(req.body?.blockRequest);
-      const uid = s.account?.me?.uid;
-      if (saved && uid && !templates.data[uid]) {
-        templates.data[uid] = { ...saved, learnedAt: Date.now(), failures: 0 };
-        templates.save();
-        log.info(`[${s.username}] Restored the saved block request from the dashboard — fast mode on.`);
-      }
-      res.json({ success: true, auth: s.publicAuth(), blockRequest: publicTemplate(uid && templates.data[uid]) });
-      ensureWorkers(s);
-    } catch (e) {
-      res.status(e.code === 'not_logged_in' ? 401 : 503).json({ error: e.message, code: e.code, auth: s.publicAuth() });
-    }
+
+    req.session.auth.loggedIn = true;
+    req.session.auth.cookieHeader = parsed.cookieHeader;
+    req.session.auth.ttCookieId = parsed.ttCookieId;
+    req.session.auth.ttTargetIdc = parsed.ttTargetIdc || 'useast1a';
+    req.session.auth.csrfToken = parsed.csrfToken;
+    req.session.auth.msToken = parsed.msToken;
+    req.session.auth.accountName = normalizeTikTokHandle(accountName) || 'TikTok Account';
+
+    const payload = {
+      loggedIn: true,
+      accountName: req.session.auth.accountName,
+      autoBlockSharers: req.session.auth.autoBlockSharers,
+    };
+    req.session.broadcast({ type: 'AUTH', auth: payload });
+    res.json({ success: true, auth: payload });
   })
 );
 
-app.post(
-  '/api/tiktok/logout',
-  wrap(async (req, res) => {
-    const s = req.session;
-    failQueue(s, 'Account disconnected');
-    s.cookies = null;
-    if (s.account) await s.account.close();
-    s.account = null;
-    Object.assign(s.auth, { loggedIn: false, accountName: '', nickname: '', avatar: '', autoBlockSharers: false, engineError: null });
-    s.broadcast({ type: 'AUTH', auth: s.publicAuth() });
-    res.json({ success: true });
-  })
-);
+app.post('/api/tiktok/logout', (req, res) => {
+  req.session.auth = {
+    loggedIn: false,
+    cookieHeader: '',
+    ttCookieId: '',
+    ttTargetIdc: 'useast1a',
+    csrfToken: '',
+    msToken: '',
+    accountName: '',
+    autoBlockSharers: false,
+  };
+  req.session.broadcast({ type: 'AUTH', auth: req.session.auth });
+  res.json({ success: true });
+});
 
 app.post('/api/tiktok/auto-block', (req, res) => {
-  const s = req.session;
-  s.auth.autoBlockSharers = Boolean(req.body?.enabled);
-  const t = Number(req.body?.threshold);
-  if (t >= 1 && t <= 10) s.auth.autoBlockThreshold = Math.round(t);
-  s.broadcast({ type: 'AUTH', auth: s.publicAuth() });
-  res.json({ success: true, auth: s.publicAuth() });
+  req.session.auth.autoBlockSharers = Boolean(req.body?.enabled);
+  req.session.broadcast({
+    type: 'AUTH',
+    auth: {
+      loggedIn: req.session.auth.loggedIn,
+      accountName: req.session.auth.accountName,
+      autoBlockSharers: req.session.auth.autoBlockSharers,
+    },
+  });
+  res.json({ success: true, autoBlockSharers: req.session.auth.autoBlockSharers });
 });
 
 app.get('/api/tiktok/blacklist', (req, res) => {
-  const list = blacklist.all();
+  const list = ttBlacklist.all();
   res.json({ usernames: list, text: list.join('\n') });
 });
 
 app.post('/api/tiktok/blacklist/save', (req, res) => {
   const { text, usernames } = req.body || {};
-  blacklist.replaceAll(Array.isArray(usernames) ? usernames : String(text || ''));
-  broadcastBlacklist();
-  const list = blacklist.all();
-  res.json({ success: true, total: list.length, usernames: list });
+  const total = ttBlacklist.replaceAll(usernames ? usernames : text);
+  broadcastGlobalBlacklist();
+  const allList = ttBlacklist.all();
+  res.json({ success: true, total, usernames: allList });
 });
 
-app.post('/api/tiktok/blacklist/remove', (req, res) => {
-  const h = normalizeHandle(req.body?.username);
-  if (blacklist.set.delete(h)) {
-    blacklist.persist();
-    broadcastBlacklist();
-  }
-  res.json({ success: true, total: blacklist.all().length });
+app.post('/api/tiktok/blacklist/clear', (req, res) => {
+  ttBlacklist.clear();
+  broadcastGlobalBlacklist();
+  res.json({ success: true, total: 0, usernames: [] });
 });
 
-function startBlockJob(req, res) {
-  const handles = cleanHandleList(req.body?.usernames);
-  if (!handles.length) return res.status(400).json({ error: 'No valid TikTok usernames to block.' });
-  blacklist.add(handles);
-  broadcastBlacklist();
-  const s = req.session;
-  if (!s.cookies) {
-    return res.status(409).json({ error: 'Added to the blocklist. Connect your TikTok account to block them on TikTok.', blacklisted: handles.length });
-  }
-  const job = createJob(s, handles, handles.length === 1 ? 'single' : 'manual');
-  res.status(202).json(publicJob(job));
-}
-app.post('/api/tiktok/jobs/block', startBlockJob);
-app.post('/api/tiktok/block', startBlockJob);
+app.post(
+  '/api/tiktok/block',
+  asyncRoute(async (req, res) => {
+    const list = parseUsernameList(req.body?.usernames);
+    if (list.length === 0) return res.status(400).json({ error: 'No valid usernames provided.' });
+    const batchRes = await runParallelTikTokBlockBatch(req.session, list);
+    res.json({
+      success: true,
+      totalBlacklisted: batchRes.totalBlacklisted,
+      blockedOnTikTokCount: batchRes.blockedOnTikTokCount,
+      failedCount: batchRes.failedCount,
+      loggedIn: req.session.auth.loggedIn,
+      note: batchRes.lastNote,
+      blacklist: ttBlacklist.all(),
+    });
+  })
+);
+
+app.post(
+  '/api/tiktok/jobs/block',
+  asyncRoute(async (req, res) => {
+    const list = parseUsernameList(req.body?.usernames);
+    if (list.length === 0) {
+      return res.status(400).json({ error: 'No valid usernames provided to block.' });
+    }
+    if (!req.session.auth.loggedIn || !req.session.auth.cookieHeader) {
+      return res.status(400).json({
+        error: 'TikTok cookie missing — click TikTok Account and save your cookie first.',
+      });
+    }
+
+    ttBlacklist.add(list);
+    broadcastGlobalBlacklist();
+
+    const jobId = crypto.randomUUID();
+    const jobObj = {
+      id: jobId,
+      status: 'running',
+      total: list.length,
+      processed: 0,
+      blockedOnTikTokCount: 0,
+      failedCount: 0,
+      currentUsername: null,
+      lastNote: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+      cancelRequested: false,
+    };
+    req.session.jobs.set(jobId, jobObj);
+
+    (async () => {
+      let cursor = 0;
+      const worker = async (laneIdx) => {
+        if (laneIdx > 0) await delay(laneIdx * CONFIG.tiktok.blockStaggerMs);
+        while (cursor < list.length) {
+          if (jobObj.cancelRequested) {
+            jobObj.status = 'cancelled';
+            return;
+          }
+          const uname = list[cursor++];
+          if (!uname) continue;
+          jobObj.currentUsername = uname;
+          const existing = req.session.sharers.get(uname) || { uniqueId: uname };
+          existing.blacklisted = true;
+          if (req.session.sharers.has(uname)) req.session.sharers.set(uname, existing);
+
+          try {
+            const result = await blockTikTokUserOnAccount(req.session, existing);
+            if (result.blockedOnTikTok) jobObj.blockedOnTikTokCount++;
+            else {
+              jobObj.failedCount++;
+              if (result.note) jobObj.lastNote = result.note;
+            }
+          } catch (err) {
+            jobObj.failedCount++;
+            jobObj.lastNote = err.message;
+          }
+          jobObj.processed++;
+          await delay(CONFIG.tiktok.blockStaggerMs);
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(CONFIG.tiktok.blockConcurrency, list.length) }, (_, i) => worker(i))
+      );
+      if (jobObj.status === 'running') jobObj.status = 'done';
+      jobObj.currentUsername = null;
+      jobObj.finishedAt = Date.now();
+    })().catch((err) => {
+      jobObj.status = 'aborted';
+      jobObj.lastNote = err.message;
+      jobObj.finishedAt = Date.now();
+    });
+
+    res.status(202).json(jobObj);
+  })
+);
 
 app.get('/api/tiktok/jobs/:id', (req, res) => {
   const job = req.session.jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'No such job.' });
-  res.json(publicJob(job));
+  if (!job) return res.status(404).json({ error: 'No such TikTok job.' });
+  res.json(job);
 });
 
 app.delete('/api/tiktok/jobs/:id', (req, res) => {
-  const s = req.session;
-  const job = s.jobs.get(req.params.id);
-  if (!job || job.status !== 'running') return res.status(404).json({ error: 'No running job with that ID.' });
+  const job = req.session.jobs.get(req.params.id);
+  if (!job || job.status !== 'running') return res.status(404).json({ error: 'No active TikTok job.' });
   job.cancelRequested = true;
-  const before = s.queue.length;
-  s.queue = s.queue.filter((it) => it.job !== job);
-  job.cancelledCount += before - s.queue.length;
-  finishJobIfDone(s, job);
-  s.broadcast({ type: 'JOB', job: publicJob(job) });
   res.json({ success: true });
 });
 
 app.get('/api/tiktok/diagnostics', (req, res) => {
-  const s = req.session;
   res.json({
-    auth: s.publicAuth(),
-    knownProfiles: Object.keys(profiles.data).length,
-    queued: s.queue.length,
-    pausedForSec: Math.max(0, Math.round((s.pausedUntil - Date.now()) / 1000)),
-    recentAttempts: s.attempts.slice().reverse(),
+    auth: {
+      loggedIn: req.session.auth.loggedIn,
+      accountName: req.session.auth.accountName,
+      hasCookieId: Boolean(req.session.auth.ttCookieId),
+    },
+    cachedProfilesCount: tiktokProfileCache.size,
+    recentAttempts: req.session.diagnosticHistory.slice().reverse(),
   });
 });
 
 app.post(
   '/api/tiktok/connect',
-  wrap(async (req, res) => {
-    const s = req.session;
-    const target = normalizeHandle(req.body?.username);
-    if (!isValidHandle(target)) return res.status(400).json({ error: 'Enter the TikTok username of the LIVE you want to watch.' });
+  asyncRoute(async (req, res) => {
+    const rawUsername = normalizeTikTokHandle(req.body?.username);
+    if (!rawUsername) return res.status(400).json({ error: 'TikTok username is required.' });
 
-    if (s.connection) {
+    if (req.session.connection) {
       try {
-        await s.connection.disconnect();
-      } catch {}
-      s.connection = null;
+        await req.session.connection.disconnect();
+      } catch (e) {}
+      req.session.connection = null;
     }
 
     try {
       const lib = await getTikTokLib();
-      const Conn = lib.TikTokLiveConnection || lib.WebcastPushConnection;
+      const TikTokLiveConnection = lib.TikTokLiveConnection || lib.WebcastPushConnection;
       const WebcastEvent = lib.WebcastEvent || {};
       const ControlEvent = lib.ControlEvent || {};
-      const conn = new Conn(target, {
-        processInitialData: false,
+
+      const options = {
+        processInitialData: true,
         enableExtendedGiftInfo: false,
-        fetchRoomInfoOnConnect: true,
-        ...(CONFIG.eulerApiKey ? { signApiKey: CONFIG.eulerApiKey } : {}),
-      });
-      s.connection = conn;
-
-      conn.on(WebcastEvent.SHARE || 'share', (d) => recordSharer(s, d));
-      conn.on(WebcastEvent.SOCIAL || 'social', (d) => {
-        if (isSharePacket(d)) recordSharer(s, d);
-      });
-      const ended = (why) => () => {
-        if (s.connection !== conn) return;
-        s.state = { connected: false, username: target, roomId: null, error: why };
-        s.broadcast({ type: 'STATUS', state: s.state });
+        enableWebsocketUpgrade: true,
+        requestPollingIntervalMs: 700,
       };
-      conn.on(WebcastEvent.STREAM_END || 'streamEnd', ended('The LIVE ended'));
-      conn.on(ControlEvent.DISCONNECTED || 'disconnected', ended('Disconnected from the LIVE'));
-      conn.on('error', (err) => log.warn(`[${s.username}] Live error:`, err?.message || err));
+      if (CONFIG.eulerApiKey) options.signApiKey = CONFIG.eulerApiKey;
+      if (req.session.auth.loggedIn && req.session.auth.ttCookieId) {
+        options.sessionId = req.session.auth.ttCookieId;
+        options.ttTargetIdc = req.session.auth.ttTargetIdc || 'useast1a';
+      }
 
-      const st = await conn.connect();
-      s.state = { connected: true, username: target, roomId: String(st?.roomId || ''), error: null };
-      log.info(`[${s.username}] Listening to @${target}`);
-      s.broadcast({ type: 'STATUS', state: s.state });
-      res.json({ success: true, state: s.state });
+      const conn = new TikTokLiveConnection(rawUsername, options);
+      req.session.connection = conn;
+
+      const shareEvents = new Set([WebcastEvent.SHARE, 'share', 'WebcastSocialMessage'].filter(Boolean));
+      const socialEvents = new Set([WebcastEvent.SOCIAL, 'social'].filter(Boolean));
+
+      for (const ev of shareEvents) conn.on(ev, (data) => recordTikTokSharer(req.session, data));
+      for (const ev of socialEvents) {
+        conn.on(ev, (data) => {
+          if (isSocialSharePacket(data)) recordTikTokSharer(req.session, data);
+        });
+      }
+
+      conn.on(ControlEvent.RAW_DATA || 'rawData', (type, BinaryOrObj) => {
+        if (
+          typeof type === 'string' &&
+          type.toLowerCase().includes('social') &&
+          BinaryOrObj &&
+          typeof BinaryOrObj === 'object'
+        ) {
+          if (isSocialSharePacket(BinaryOrObj)) recordTikTokSharer(req.session, BinaryOrObj);
+        }
+      });
+
+      conn.on(WebcastEvent.STREAM_END || ControlEvent.STREAM_END || 'streamEnd', () => {
+        req.session.state = { connected: false, username: rawUsername, roomId: null, error: 'Stream ended' };
+        req.session.broadcast({ type: 'STATUS', state: req.session.state });
+      });
+
+      conn.on(ControlEvent.DISCONNECTED || 'disconnected', () => {
+        req.session.state = { connected: false, username: rawUsername, roomId: null, error: 'Disconnected' };
+        req.session.broadcast({ type: 'STATUS', state: req.session.state });
+      });
+
+      conn.on('error', (err) =>
+        log.warn(`[${req.session.username} | ${req.session.sessionId}] Connection error:`, err?.message || err)
+      );
+
+      const state = await conn.connect();
+      req.session.state = {
+        connected: true,
+        username: rawUsername,
+        roomId: String(state?.roomId || 'live'),
+        error: null,
+      };
+      log.info(`[${req.session.username} | ${req.session.sessionId}] Connected to LIVE @${rawUsername}`);
+      req.session.broadcast({ type: 'STATUS', state: req.session.state });
+      res.json({ success: true, state: req.session.state });
     } catch (err) {
-      const msg = /offline|not.*live|LIVE has ended|UserOfflineError/i.test(err?.message || '')
-        ? `@${target} isn't live right now.`
-        : err?.message || 'Could not connect to the LIVE.';
-      s.connection = null;
-      s.state = { connected: false, username: target, roomId: null, error: msg };
-      s.broadcast({ type: 'STATUS', state: s.state });
-      res.status(400).json({ error: msg });
+      req.session.state = { connected: false, username: rawUsername, roomId: null, error: err.message };
+      req.session.broadcast({ type: 'STATUS', state: req.session.state });
+      res.status(400).json({ error: err.message });
     }
   })
 );
 
 app.post(
   '/api/tiktok/disconnect',
-  wrap(async (req, res) => {
-    const s = req.session;
-    const conn = s.connection;
-    s.connection = null;
-    if (conn) {
+  asyncRoute(async (req, res) => {
+    if (req.session.connection) {
       try {
-        await conn.disconnect();
-      } catch {}
+        await req.session.connection.disconnect();
+      } catch (e) {}
+      req.session.connection = null;
     }
-    s.state = { connected: false, username: null, roomId: null, error: null };
-    s.broadcast({ type: 'STATUS', state: s.state });
-    res.json({ success: true, state: s.state });
+    req.session.state = { connected: false, username: null, roomId: null, error: null };
+    req.session.broadcast({ type: 'STATUS', state: req.session.state });
+    res.json({ success: true, state: req.session.state });
   })
 );
 
@@ -1867,62 +1211,28 @@ app.post('/api/tiktok/clear', (req, res) => {
   res.json({ success: true });
 });
 
-app.use((err, req, res, _next) => {
-  log.error('500:', err?.stack || err);
-  res.status(500).json({ error: err?.message || 'Server error' });
+app.get('/api/tiktok/sharers', (req, res) => {
+  res.json({
+    state: req.session.state,
+    auth: {
+      loggedIn: req.session.auth.loggedIn,
+      accountName: req.session.auth.accountName,
+      autoBlockSharers: req.session.auth.autoBlockSharers,
+    },
+    sharers: Array.from(req.session.sharers.values()),
+    blacklist: ttBlacklist.all(),
+  });
 });
 
-// Low-memory mode: shut the browser down when nothing needs it. Accounts keep their cookies and
-// reopen automatically on the next block. It stays open while a LIVE with auto-block is running.
-setInterval(async () => {
-  if (!CONFIG.lowMemory || !browserPromise) return;
-  const busy = [...sessions.values()].some(
-    (s) => s.queue.length || s.workers || s.opening || (s.state.connected && s.auth.autoBlockSharers && s.cookies)
-  );
-  if (busy) {
-    lastBrowserUse = Date.now();
-    return;
-  }
-  if (Date.now() - lastBrowserUse < CONFIG.browser.idleCloseMs) return;
-  const b = await browserPromise.catch(() => null);
-  browserPromise = null;
-  for (const s of sessions.values()) {
-    if (s.account) {
-      s.account.ready = false;
-      s.account = null;
-    }
-  }
-  if (b) {
-    log.info('No blocks for a while — closing the browser to free memory.');
-    await b.close().catch(() => {});
-  }
-  setEngineStatus('idle', '', 0);
-}, 20000).unref();
-
-// Close idle browser contexts so Chrome doesn't hold memory for absent users.
-setInterval(() => {
-  const now = Date.now();
-  for (const s of sessions.values()) {
-    if (s.account && !s.sseClients.size && !s.queue.length && now - s.lastSeen > CONFIG.sessionIdleMs) {
-      log.info(`[${s.username}] Idle — closing browser context.`);
-      s.account.close();
-      s.account = null; // cookies are kept; it reopens on the next block
-    }
-  }
-}, 60000).unref();
+app.use((err, req, res, _next) => {
+  log.error(`500: ${err.message}`);
+  res.status(500).json({ error: err.message, kind: 'UNKNOWN' });
+});
 
 const server = app.listen(CONFIG.port, () => {
-  log.info(`NEXUS listening on :${CONFIG.port}`);
-  // Find (or download) the browser right away so connecting an account is quick.
-  resolveBrowserPath().catch((e) => log.error('Browser setup failed:', explainLaunchError(e)));
+  log.info(`Nexus TikTok Engine active on port ${CONFIG.port}`);
 });
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, async () => {
-    server.close();
-    for (const s of sessions.values()) await s.account?.close();
-    const b = browserPromise && (await browserPromise.catch(() => null));
-    if (b) await b.close().catch(() => {});
-    process.exit(0);
-  });
+  process.on(sig, () => server.close(() => process.exit(0)));
 }
