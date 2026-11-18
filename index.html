@@ -48,6 +48,7 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: pulse 2.4s infinite; }
 .status-dot.offline { background: var(--faint); box-shadow: none; animation: none; }
 .status-dot.live { background: var(--emerald); box-shadow: 0 0 8px var(--emerald); }
+.status-dot.expired { background: var(--red); box-shadow: 0 0 8px var(--red); }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(45,226,208,0.5); } 70% { box-shadow: 0 0 0 6px rgba(45,226,208,0); } 100% { box-shadow: 0 0 0 0 rgba(45,226,208,0); } }
 
 .sticky-header { position: sticky; top: 0; z-index: 100; padding: 8px 0 14px; background: linear-gradient(180deg, var(--void) 65%, transparent); }
@@ -80,6 +81,8 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .auto-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: none; }
 .auto-status.is-live .auto-dot { background: var(--cyan); animation: pulse 2.4s infinite; }
 
+#cookie-expired-banner { display: none; margin-top: 12px; padding: 12px 16px; background: rgba(255, 71, 105, 0.14); border: 1px solid rgba(255, 71, 105, 0.45); border-left: 4px solid var(--red); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; color: #ffd6de; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
 #tt-metrics-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 10px; margin-top: 12px; }
 .metric-tile { background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--line-2); border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; }
 .metric-tile .m-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
@@ -108,7 +111,7 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 #empty-state h3 { margin: 0 0 6px; font-family: var(--mono); font-size: 13.5px; color: var(--text); }
 
 .modal { display: none; position: fixed; inset: 0; z-index: 1000; background: rgba(3,4,8,0.84); backdrop-filter: blur(8px); justify-content: center; align-items: center; padding: 20px; }
-.modal-content { width: 100%; max-width: 580px; background: var(--surface-2); border: 1px solid var(--line-2); border-top: 2px solid var(--cyan); border-radius: var(--r-md); padding: 24px 26px; }
+.modal-content { width: 100%; max-width: 600px; background: var(--surface-2); border: 1px solid var(--line-2); border-top: 2px solid var(--cyan); border-radius: var(--r-md); padding: 24px 26px; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .modal-head h2 { margin: 0; font-size: 16px; font-family: var(--mono); }
 .modal-close { background: none; border: 0; color: var(--muted); font-size: 16px; cursor: pointer; }
@@ -216,6 +219,11 @@ pre.scanner-pre { background: var(--void); border: 1px solid var(--line-2); bord
       </div>
     </div>
 
+    <div id="cookie-expired-banner">
+      <span>⚠ <b>TIKTOK COOKIE EXPIRED (Error 13):</b> TikTok rejected your current cookie ("session expired, please sign in again"), which causes every block to fail with "User ID Invalid".</span>
+      <button class="btn btn-danger" onclick="openTikTokLoginModal()">Update Cookie Now</button>
+    </div>
+
     <div id="tt-metrics-bar">
       <div class="metric-tile"><span class="m-label">Active Sharers</span><span class="m-val" id="tt-metric-visible">0</span></div>
       <div class="metric-tile"><span class="m-label">Total Share Events</span><span class="m-val emerald" id="tt-metric-total-shares">0</span></div>
@@ -240,14 +248,14 @@ pre.scanner-pre { background: var(--void); border: 1px solid var(--line-2); bord
       <button class="modal-close" onclick="closeErrorScannerModal()">✕</button>
     </div>
     <p style="font-size:12px; color:var(--muted); margin-top:0;">
-      Enter any TikTok @username below and click <b>Run Deep Scan</b>. This tests your Cookie against TikTok Passport, runs all 3 Profile Resolver Layers, and tests all 5 Block Vectors with raw JSON output.
+      Enter any TikTok @username below and click <b>Run Deep Scan</b>. This probes all 5 TikTok Data Centers (`alisg`, `maliva`, `eu-ttp2`, `useast2a`, `useast1a`), resolves the user, and tests blocking.
     </p>
     <div style="display:flex; gap:8px; margin-bottom:12px;">
       <input type="text" id="scanner-username-input" placeholder="@username_to_test..." style="flex:1; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:4px; color:var(--cyan); font-family:var(--mono); font-size:12px; outline:none;" onkeydown="if(event.key==='Enter')runDeepErrorScan()">
       <button class="btn btn-primary" onclick="runDeepErrorScan()" id="btn-run-scan">▶ Run Deep Scan</button>
       <button class="btn btn-violet" onclick="copyScannerReport()">📋 Copy Report</button>
     </div>
-    <pre id="scanner-output" class="scanner-pre">Click "▶ Run Deep Scan" to inspect your Cookie health, Resolver layers, and all 5 TikTok Block API vectors...</pre>
+    <pre id="scanner-output" class="scanner-pre">Click "▶ Run Deep Scan" to inspect your Cookie health across all 5 TikTok Data Centers and test blocking...</pre>
     <div class="modal-actions">
       <button class="btn" onclick="openTikTokDiagnosticsModal()">View Attempt History</button>
       <button class="btn btn-primary" onclick="closeErrorScannerModal()">Close</button>
@@ -284,14 +292,19 @@ pre.scanner-pre { background: var(--void); border: 1px solid var(--line-2); bord
       <h2>TikTok Account Session</h2>
       <button class="modal-close" onclick="closeTikTokLoginModal()">✕</button>
     </div>
-    <p style="font-size:12px; color:var(--muted); margin-top:0;">Connect your TikTok session cookie so NEXUS can auto-block users.</p>
-    <input type="text" id="tt-account-name-input" placeholder="@your_handle" style="width:100%; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:12px; margin-bottom:14px; outline:none;">
-    <input type="password" id="tt-cookie-input" placeholder="Paste full Cookie header or sessionid..." style="width:100%; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--cyan); font-family:var(--mono); font-size:12px; margin-bottom:14px; outline:none;">
+    <div style="font-size:11.5px; color:var(--muted); margin-bottom:12px; background:var(--void); border:1px solid var(--line-2); padding:10px 12px; border-radius:6px; line-height:1.55;">
+      <b style="color:var(--cyan);">How to get a fresh, non-expired Cookie from TikTok.com:</b><br>
+      1. Open <b>tiktok.com</b> in Chrome/Edge while logged into your account.<br>
+      2. Press <b>F12</b> → open the <b>Network</b> tab → refresh the page → click any request to <code>www.tiktok.com</code>.<br>
+      3. Under <b>Request Headers</b>, right-click the full <b><code>cookie:</code></b> value (or copy your fresh <code>sessionid</code> from <b>Application → Cookies</b>) and paste it below.
+    </div>
+    <input type="text" id="tt-account-name-input" placeholder="@your_handle" style="width:100%; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:12px; margin-bottom:12px; outline:none;">
+    <textarea id="tt-cookie-input" placeholder="Paste full Cookie header (recommended) or fresh sessionid..." style="width:100%; height:95px; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:6px; color:var(--cyan); font-family:var(--mono); font-size:11.5px; margin-bottom:14px; outline:none; resize:vertical;"></textarea>
     <div class="modal-actions">
       <button class="btn btn-danger" onclick="logoutTikTokAccount()">Disconnect Account</button>
       <div style="display:flex; gap:8px;">
         <button class="btn" onclick="closeTikTokLoginModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="saveTikTokLogin()">Save &amp; Connect</button>
+        <button class="btn btn-primary" onclick="saveTikTokLogin()" id="btn-save-tt-login">Save &amp; Verify Cookie</button>
       </div>
     </div>
   </div>
@@ -357,7 +370,7 @@ let ttSharersMap = new Map();
 let ttBlacklistSet = new Set();
 let ttEventSource = null;
 let ttState = { connected: false, username: null, error: null };
-let ttAuth = { loggedIn: false, accountName: '', autoBlockSharers: false };
+let ttAuth = { loggedIn: false, accountName: '', autoBlockSharers: false, passportVerified: false, passportErrorCode: null };
 let activeTikTokJobId = null;
 let lastAttemptedUsername = '';
 
@@ -386,7 +399,7 @@ function showToast(message, type = 'info') {
   const glyph = { error:'✕', success:'✓', warn:'!', info:'›' }[type] || '›';
   toast.innerHTML = `<span class="toast-glyph">${glyph}</span><span>${esc(message)}</span>`;
   document.getElementById('toast-container').appendChild(toast);
-  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4800);
+  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 5200);
 }
 
 function saveSession() {
@@ -555,25 +568,40 @@ function updateTikTokStatusUI() {
   const loginBtn = document.getElementById('btn-tt-login');
   const topDot = document.getElementById('top-tt-dot');
   const topText = document.getElementById('top-tt-text');
+  const expiredBanner = document.getElementById('cookie-expired-banner');
   
   if (document.getElementById('tt-autoblock-toggle')) {
     document.getElementById('tt-autoblock-toggle').checked = Boolean(ttAuth.autoBlockSharers);
   }
   
-  if (ttAuth.loggedIn) {
+  const isExpired = ttAuth.loggedIn && !ttAuth.passportVerified && ttAuth.passportErrorCode === 13;
+  if (expiredBanner) {
+    expiredBanner.style.display = isExpired ? 'flex' : 'none';
+  }
+
+  if (ttAuth.loggedIn && ttAuth.passportVerified) {
+    loginBtn.innerText = `✓ Auth: @${ttAuth.accountName || 'Verified'}`;
+    loginBtn.className = 'btn btn-primary';
+  } else if (isExpired) {
+    loginBtn.innerText = `⚠ Cookie Expired (@${ttAuth.accountName || 'Re-login'})`;
+    loginBtn.className = 'btn btn-danger';
+  } else if (ttAuth.loggedIn) {
     loginBtn.innerText = `Auth: @${ttAuth.accountName || 'Connected'}`;
-    loginBtn.classList.add('btn-primary');
+    loginBtn.className = 'btn btn-warn';
   } else {
     loginBtn.innerText = 'TikTok Account';
-    loginBtn.classList.remove('btn-primary');
+    loginBtn.className = 'btn';
   }
 
   if (ttState.connected) {
     topDot.className = 'status-dot live';
     topText.innerText = `Live: @${ttState.username}`;
-  } else if (ttAuth.loggedIn) {
+  } else if (isExpired) {
+    topDot.className = 'status-dot expired';
+    topText.innerText = 'Cookie Expired!';
+  } else if (ttAuth.loggedIn && ttAuth.passportVerified) {
     topDot.className = 'status-dot';
-    topText.innerText = `Auth: @${ttAuth.accountName}`;
+    topText.innerText = `Verified: @${ttAuth.accountName}`;
   } else {
     topDot.className = 'status-dot offline';
     topText.innerText = 'TikTok: Standby';
@@ -707,7 +735,7 @@ async function runTikTokBlockJobWithProgress(usernames) {
           showToast(
             `Blocked ${state.blockedOnTikTokCount}/${state.total} users!` +
               (state.lastNote && state.blockedOnTikTokCount === 0 ? ` — ${state.lastNote}` : ''),
-            state.blockedOnTikTokCount > 0 ? 'success' : 'warn'
+            state.blockedOnTikTokCount > 0 ? 'success' : 'error'
           );
         }
       } catch (e) {
@@ -736,7 +764,7 @@ async function blockSingleTikTokUser(uname) {
         data.blockedOnTikTokCount > 0
           ? `Blocked @${clean} on TikTok!`
           : `Failed @${clean}: ${data.note || 'Open 🔍 Scanner to inspect'}`,
-        data.blockedOnTikTokCount > 0 ? 'success' : 'warn'
+        data.blockedOnTikTokCount > 0 ? 'success' : 'error'
       );
     }
   } catch (e) {}
@@ -792,7 +820,7 @@ async function runDeepErrorScan() {
 
   btn.disabled = true;
   btn.innerText = 'Scanning...';
-  pre.innerText = `Running live diagnostic scan${target ? ' on @' + target.replace(/^@+/, '') : ''} (Checking TikTok Passport, 3 Resolver Layers, and 5 Block Vectors)...`;
+  pre.innerText = `Probing all 5 TikTok Data Centers (alisg, maliva, eu-ttp2, useast2a, useast1a) and testing block vectors...`;
 
   try {
     const res = await apiFetch('/api/tiktok/scan', {
@@ -890,10 +918,13 @@ function closeTikTokLoginModal() {
 async function saveTikTokLogin() {
   const accountName = document.getElementById('tt-account-name-input').value.trim();
   const cookie = document.getElementById('tt-cookie-input').value.trim();
+  const btn = document.getElementById('btn-save-tt-login');
   if (!cookie) return showToast('Paste your TikTok cookie or sessionid first.', 'warn');
   localStorage.setItem('nexusTikTokAccountName', accountName);
   localStorage.setItem('nexusTikTokCookie', cookie);
-  
+
+  btn.disabled = true;
+  btn.innerText = 'Verifying...';
   try {
     const res = await apiFetch('/api/tiktok/login', {
       method: 'POST',
@@ -905,11 +936,17 @@ async function saveTikTokLogin() {
     ttAuth = data.auth;
     updateTikTokStatusUI();
     closeTikTokLoginModal();
-    showToast(
-      `Connected TikTok as @${ttAuth.accountName}! (${ttAuth.passportNote || 'Ready'})`,
-      ttAuth.passportVerified ? 'success' : 'info'
-    );
-  } catch (e) {}
+    if (ttAuth.passportVerified) {
+      showToast(`✓ Verified TikTok Cookie! (${ttAuth.passportNote})`, 'success');
+    } else {
+      showToast(`⚠ ${ttAuth.passportNote}`, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to verify cookie.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Save & Verify Cookie';
+  }
 }
 
 async function logoutTikTokAccount() {
@@ -942,7 +979,7 @@ async function refreshTikTokDiagnostics() {
     const tbody = document.getElementById('tt-diag-tbody');
     const summary = document.getElementById('tt-diag-summary');
     if (summary && data.auth) {
-      summary.innerText = `Session: ${data.auth.loggedIn ? '@' + data.auth.accountName : 'Not Logged In'} · Passport: ${data.auth.passportNote || 'N/A'} · Cached Profiles: ${data.cachedProfilesCount || 0}`;
+      summary.innerText = `Session: ${data.auth.loggedIn ? '@' + data.auth.accountName : 'Not Logged In'} · Status: ${data.auth.passportNote || 'N/A'} · Cached Profiles: ${data.cachedProfilesCount || 0}`;
     }
     if (!data.recentAttempts?.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="padding:8px; text-align:center;">No block attempts yet.</td></tr>';
