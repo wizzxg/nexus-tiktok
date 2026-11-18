@@ -62,8 +62,8 @@ body { margin: 0; min-height: 100vh; color: var(--text); font-family: var(--sans
 .search-wrap { position: relative; flex: 1; min-width: 200px; }
 .search-wrap svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
 #search-input, #tt-username-input, #tt-quick-block-input { padding: 9px 13px 9px 36px; background: var(--void); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--r-xs); font-family: var(--sans); font-size: 13px; transition: 0.15s; width: 100%; outline: none; }
-#tt-username-input, #tt-quick-block-input { padding-left: 12px; font-family: var(--mono); font-size: 12px; width: 220px; flex: none; }
-#tt-quick-block-input { width: 195px; }
+#tt-username-input, #tt-quick-block-input { padding-left: 12px; font-family: var(--mono); font-size: 12px; width: 210px; flex: none; }
+#tt-quick-block-input { width: 185px; }
 #search-input:focus, #tt-username-input:focus, #tt-quick-block-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
 
 .toggle { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; color: var(--muted); padding: 4px 8px; transition: 0.15s; }
@@ -116,16 +116,19 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
 .modal-ta:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-soft); }
 .modal-actions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
 
-#toast-container { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 1100; max-width: 370px; }
-.toast { display: flex; align-items: flex-start; gap: 11px; background: rgba(15,19,32,0.96); backdrop-filter: blur(10px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: var(--r-xs); padding: 12px 15px; font-size: 12.5px; animation: slideIn 0.25s both; transition: 0.25s; }
+#toast-container { position: fixed; bottom: 22px; right: 22px; display: flex; flex-direction: column; gap: 10px; z-index: 1100; max-width: 440px; }
+.toast { display: flex; align-items: flex-start; gap: 11px; background: rgba(15,19,32,0.96); backdrop-filter: blur(10px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: var(--r-xs); padding: 12px 15px; font-size: 12px; animation: slideIn 0.25s both; transition: 0.25s; word-break: break-word; }
 .toast.error { border-left-color: var(--red); }
+.toast.warn { border-left-color: var(--amber); }
 @keyframes slideIn { from { transform: translateX(110%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
-#job-progress { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(540px, calc(100vw - 32px)); background: rgba(15,19,32,0.96); backdrop-filter: blur(14px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 15px 18px; z-index: 1200; }
-.jp-head { display: flex; justify-content: space-between; margin-bottom: 10px; font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+#job-progress { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(620px, calc(100vw - 32px)); background: rgba(15,19,32,0.96); backdrop-filter: blur(14px); border: 1px solid var(--line-2); border-left: 3px solid var(--cyan); border-radius: 6px; padding: 15px 18px; z-index: 1200; }
+.jp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-family: var(--mono); font-size: 11px; font-weight: 600; text-transform: uppercase; gap: 8px; }
 .jp-track { height: 5px; background: var(--void); border-radius: 3px; overflow: hidden; }
 .jp-fill { height: 100%; width: 0%; background: var(--cyan); transition: width 0.2s linear; }
-.jp-meta { margin-top: 9px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.jp-meta { margin-top: 9px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); word-break: break-word; }
+
+pre.scanner-pre { background: var(--void); border: 1px solid var(--line-2); border-radius: 6px; padding: 14px; color: var(--cyan); font-family: var(--mono); font-size: 11px; max-height: 390px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0 0 14px; }
 </style>
 </head>
 <body>
@@ -152,6 +155,9 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
       <span>// TIKTOK TERMINAL</span>
     </div>
     <div class="telemetry-bar">
+      <div class="status-pill" onclick="openErrorScannerModal()" style="border-color: rgba(245,158,11,0.4); color: var(--amber);">
+        <span>🔍 Error Scanner</span>
+      </div>
       <div class="status-pill" onclick="openTikTokDiagnosticsModal()">
         <span class="status-dot offline" id="top-tt-dot"></span>
         <span id="top-tt-text">TikTok: Standby</span>
@@ -193,6 +199,7 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
         <button class="btn btn-danger" onclick="blockAllTikTokSharers()">Fast-Block All</button>
         <button class="btn btn-violet" onclick="openTikTokBlacklistModal()">Blacklist (<span id="tt-bl-count">0</span>)</button>
         <button class="btn" onclick="openTikTokLoginModal()" id="btn-tt-login">TikTok Account</button>
+        <button class="btn btn-warn" onclick="openErrorScannerModal()">🔍 Scanner</button>
         
         <span class="divider"></span>
         <input type="text" id="tt-quick-block-input" placeholder="Quick block @user..." onkeydown="if(event.key==='Enter')quickBlockTikTokInput()">
@@ -222,6 +229,29 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
     <div class="es-glyph">◇</div>
     <h3 id="empty-title">No live shares collected yet</h3>
     <p id="empty-body">Enter your TikTok @username above and click Listen Live.</p>
+  </div>
+</div>
+
+<!-- DEEP ERROR SCANNER MODAL -->
+<div id="tt-scanner-modal" class="modal">
+  <div class="modal-content" style="max-width: 820px;">
+    <div class="modal-head">
+      <h2>🔍 Deep Error Scanner &amp; Block Vector Inspector</h2>
+      <button class="modal-close" onclick="closeErrorScannerModal()">✕</button>
+    </div>
+    <p style="font-size:12px; color:var(--muted); margin-top:0;">
+      Enter any TikTok @username below and click <b>Run Deep Scan</b>. This tests your Cookie against TikTok Passport, runs all 3 Profile Resolver Layers, and tests all 5 Block Vectors with raw JSON output.
+    </p>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <input type="text" id="scanner-username-input" placeholder="@username_to_test..." style="flex:1; padding:10px 14px; background:var(--void); border:1px solid var(--line-2); border-radius:4px; color:var(--cyan); font-family:var(--mono); font-size:12px; outline:none;" onkeydown="if(event.key==='Enter')runDeepErrorScan()">
+      <button class="btn btn-primary" onclick="runDeepErrorScan()" id="btn-run-scan">▶ Run Deep Scan</button>
+      <button class="btn btn-violet" onclick="copyScannerReport()">📋 Copy Report</button>
+    </div>
+    <pre id="scanner-output" class="scanner-pre">Click "▶ Run Deep Scan" to inspect your Cookie health, Resolver layers, and all 5 TikTok Block API vectors...</pre>
+    <div class="modal-actions">
+      <button class="btn" onclick="openTikTokDiagnosticsModal()">View Attempt History</button>
+      <button class="btn btn-primary" onclick="closeErrorScannerModal()">Close</button>
+    </div>
   </div>
 </div>
 
@@ -269,22 +299,25 @@ textarea.modal-ta { width: 100%; height: 260px; background: var(--void); color: 
 
 <!-- TIKTOK DIAGNOSTICS MODAL -->
 <div id="tt-diag-modal" class="modal">
-  <div class="modal-content" style="max-width: 760px;">
+  <div class="modal-content" style="max-width: 820px;">
     <div class="modal-head">
-      <h2>TikTok Diagnostics</h2>
+      <h2>TikTok Diagnostics History</h2>
       <button class="modal-close" onclick="closeTikTokDiagnosticsModal()">✕</button>
     </div>
     <p id="tt-diag-summary" style="font-size:12px; color:var(--muted); margin-top:0;"></p>
     <div style="overflow-y:auto; max-height:360px; border:1px solid var(--line-2); border-radius:6px; background:var(--void); margin-bottom:16px;">
       <table style="width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11px;" id="tt-diag-table">
         <thead style="background:var(--surface-2); color:var(--muted); position:sticky; top:0;">
-          <tr><th style="padding:8px; text-align:left;">Time</th><th style="padding:8px; text-align:left;">User</th><th style="padding:8px; text-align:left;">ID</th><th style="padding:8px; text-align:left;">Vector</th><th style="padding:8px; text-align:left;">Result</th></tr>
+          <tr><th style="padding:8px; text-align:left;">Time</th><th style="padding:8px; text-align:left;">User</th><th style="padding:8px; text-align:left;">ID</th><th style="padding:8px; text-align:left;">Vector</th><th style="padding:8px; text-align:left;">Detailed Result</th></tr>
         </thead>
         <tbody id="tt-diag-tbody"></tbody>
       </table>
     </div>
     <div class="modal-actions">
-      <button class="btn" onclick="refreshTikTokDiagnostics()">↻ Refresh</button>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" onclick="refreshTikTokDiagnostics()">↻ Refresh</button>
+        <button class="btn btn-warn" onclick="closeTikTokDiagnosticsModal(); openErrorScannerModal();">🔍 Open Deep Scanner</button>
+      </div>
       <button class="btn btn-primary" onclick="closeTikTokDiagnosticsModal()">Close</button>
     </div>
   </div>
@@ -313,6 +346,7 @@ const ttBlacklistModal = document.getElementById('tt-blacklist-modal');
 const ttBlacklistTa = document.getElementById('tt-blacklist-textarea');
 const ttLoginModal = document.getElementById('tt-login-modal');
 const ttDiagModal = document.getElementById('tt-diag-modal');
+const ttScannerModal = document.getElementById('tt-scanner-modal');
 const emptyState = document.getElementById('empty-state');
 
 let visibleIds = [];
@@ -325,6 +359,7 @@ let ttEventSource = null;
 let ttState = { connected: false, username: null, error: null };
 let ttAuth = { loggedIn: false, accountName: '', autoBlockSharers: false };
 let activeTikTokJobId = null;
+let lastAttemptedUsername = '';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -351,7 +386,7 @@ function showToast(message, type = 'info') {
   const glyph = { error:'✕', success:'✓', warn:'!', info:'›' }[type] || '›';
   toast.innerHTML = `<span class="toast-glyph">${glyph}</span><span>${esc(message)}</span>`;
   document.getElementById('toast-container').appendChild(toast);
-  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3800);
+  setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 4800);
 }
 
 function saveSession() {
@@ -610,7 +645,7 @@ function ensureProgressBar() {
   if (bar) return bar;
   bar = document.createElement('div');
   bar.id = 'job-progress';
-  bar.innerHTML = `<div class="jp-head"><span id="jp-label">Working…</span><button id="jp-cancel" class="btn btn-danger" style="width:auto; margin:0; padding:4px 8px;">Cancel</button></div><div class="jp-track"><div id="jp-fill" class="jp-fill"></div></div><div id="jp-meta" class="jp-meta"></div>`;
+  bar.innerHTML = `<div class="jp-head"><span id="jp-label">Working…</span><div style="display:flex; gap:6px;"><button class="btn btn-warn" style="width:auto; margin:0; padding:4px 8px;" onclick="openErrorScannerModal()">🔍 Scan Error</button><button id="jp-cancel" class="btn btn-danger" style="width:auto; margin:0; padding:4px 8px;">Cancel</button></div></div><div class="jp-track"><div id="jp-fill" class="jp-fill"></div></div><div id="jp-meta" class="jp-meta"></div>`;
   document.body.appendChild(bar);
   return bar;
 }
@@ -632,6 +667,7 @@ async function runTikTokBlockJobWithProgress(usernames) {
   if (activeTikTokJobId) return showToast('Job already running.', 'warn');
   const cleanTargets = parseCleanUsernames(usernames);
   if (cleanTargets.length === 0) return showToast('No valid usernames to block.', 'warn');
+  lastAttemptedUsername = cleanTargets[0];
 
   try {
     const res = await apiFetch('/api/tiktok/jobs/block', {
@@ -667,10 +703,10 @@ async function runTikTokBlockJobWithProgress(usernames) {
         if (state.status !== 'running') {
           clearInterval(poll);
           activeTikTokJobId = null;
-          setTimeout(hideProgress, 3500);
+          setTimeout(hideProgress, 6500);
           showToast(
             `Blocked ${state.blockedOnTikTokCount}/${state.total} users!` +
-              (state.lastNote && state.blockedOnTikTokCount === 0 ? ` (${state.lastNote})` : ''),
+              (state.lastNote && state.blockedOnTikTokCount === 0 ? ` — ${state.lastNote}` : ''),
             state.blockedOnTikTokCount > 0 ? 'success' : 'warn'
           );
         }
@@ -685,6 +721,7 @@ async function runTikTokBlockJobWithProgress(usernames) {
 async function blockSingleTikTokUser(uname) {
   const clean = parseCleanUsernames([uname])[0];
   if (!clean) return;
+  lastAttemptedUsername = clean;
   ttBlacklistSet.add(clean);
   queueRender();
   try {
@@ -698,7 +735,7 @@ async function blockSingleTikTokUser(uname) {
       showToast(
         data.blockedOnTikTokCount > 0
           ? `Blocked @${clean} on TikTok!`
-          : `Blacklisted @${clean}${data.note ? ' (' + data.note + ')' : ''}`,
+          : `Failed @${clean}: ${data.note || 'Open 🔍 Scanner to inspect'}`,
         data.blockedOnTikTokCount > 0 ? 'success' : 'warn'
       );
     }
@@ -734,7 +771,52 @@ async function toggleTikTokAutoBlock() {
   } catch (e) {}
 }
 
-// ---- MODALS ----
+// ---- DEEP ERROR SCANNER MODAL ----
+function openErrorScannerModal() {
+  ttScannerModal.style.display = 'flex';
+  const inp = document.getElementById('scanner-username-input');
+  if (!inp.value && lastAttemptedUsername) {
+    inp.value = lastAttemptedUsername;
+  }
+}
+
+function closeErrorScannerModal() {
+  ttScannerModal.style.display = 'none';
+}
+
+async function runDeepErrorScan() {
+  const inp = document.getElementById('scanner-username-input');
+  const pre = document.getElementById('scanner-output');
+  const btn = document.getElementById('btn-run-scan');
+  const target = inp.value.trim();
+
+  btn.disabled = true;
+  btn.innerText = 'Scanning...';
+  pre.innerText = `Running live diagnostic scan${target ? ' on @' + target.replace(/^@+/, '') : ''} (Checking TikTok Passport, 3 Resolver Layers, and 5 Block Vectors)...`;
+
+  try {
+    const res = await apiFetch('/api/tiktok/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: target })
+    });
+    const data = await res.json();
+    pre.innerText = JSON.stringify(data, null, 2);
+  } catch (err) {
+    pre.innerText = `Scanner request error: ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.innerText = '▶ Run Deep Scan';
+  }
+}
+
+function copyScannerReport() {
+  const text = document.getElementById('scanner-output').innerText;
+  navigator.clipboard?.writeText(text);
+  showToast('Copied full scanner report to clipboard!', 'success');
+}
+
+// ---- OTHER MODALS ----
 async function openTikTokBlacklistModal() {
   ttBlacklistModal.style.display = 'flex';
   try {
@@ -823,7 +905,10 @@ async function saveTikTokLogin() {
     ttAuth = data.auth;
     updateTikTokStatusUI();
     closeTikTokLoginModal();
-    showToast(`Connected TikTok as @${ttAuth.accountName}!`, 'success');
+    showToast(
+      `Connected TikTok as @${ttAuth.accountName}! (${ttAuth.passportNote || 'Ready'})`,
+      ttAuth.passportVerified ? 'success' : 'info'
+    );
   } catch (e) {}
 }
 
@@ -851,10 +936,13 @@ async function refreshTikTokDiagnostics() {
   try {
     const res = await apiFetch('/api/tiktok/diagnostics');
     const data = await res.json();
+    if (data.lastFailedUsername && !lastAttemptedUsername) {
+      lastAttemptedUsername = data.lastFailedUsername;
+    }
     const tbody = document.getElementById('tt-diag-tbody');
     const summary = document.getElementById('tt-diag-summary');
     if (summary && data.auth) {
-      summary.innerText = `Session: ${data.auth.loggedIn ? '@' + data.auth.accountName : 'Not Logged In'} · Cached Profiles: ${data.cachedProfilesCount || 0}`;
+      summary.innerText = `Session: ${data.auth.loggedIn ? '@' + data.auth.accountName : 'Not Logged In'} · Passport: ${data.auth.passportNote || 'N/A'} · Cached Profiles: ${data.cachedProfilesCount || 0}`;
     }
     if (!data.recentAttempts?.length) {
       tbody.innerHTML = '<tr><td colspan="5" style="padding:8px; text-align:center;">No block attempts yet.</td></tr>';
@@ -875,6 +963,7 @@ document.addEventListener('keydown', (e) => {
     closeTikTokBlacklistModal();
     closeTikTokLoginModal();
     closeTikTokDiagnosticsModal();
+    closeErrorScannerModal();
   }
 });
 
