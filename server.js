@@ -14,16 +14,17 @@ require('events').EventEmitter.defaultMaxListeners = 250;
 const CONFIG = {
   port: Number(process.env.PORT) || 3000,
   ttBlacklistPath: process.env.TT_BLACKLIST_PATH || path.join(__dirname, 'tiktok_blacklist.txt'),
-  ttProfilesPath: process.env.TT_PROFILES_PATH || path.join(__dirname, 'tiktok_profiles_v4.json'),
+  ttProfilesPath: process.env.TT_PROFILES_PATH || path.join(__dirname, 'tiktok_profiles_v5.json'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
   eulerApiKey: process.env.EULER_API_KEY || null,
   tiktok: {
     resolveTimeoutMs: 8500,
     blockTimeoutMs: 9000,
     blockConcurrency: 2,
-    blockStaggerMs: 380,
-    tikwmMinIntervalMs: 1100,
+    blockStaggerMs: 360,
+    tikwmMinIntervalMs: 1150,
     shareDedupWindowMs: 1200,
+    candidateIdcs: ['alisg', 'maliva', 'eu-ttp2', 'useast2a', 'useast1a'],
   },
 };
 
@@ -69,7 +70,6 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: true,
 });
 
-// Safely quotes 15+ digit integers before JSON.parse so 64-bit TikTok IDs never round or truncate
 function parseJsonSafe64(rawText) {
   if (typeof rawText !== 'string') return rawText;
   const patched = rawText.replace(
@@ -304,15 +304,17 @@ class ClientSession {
     this.username = 'Operator';
     this.auth = {
       loggedIn: false,
+      rawCookieInput: '',
       cookieHeader: '',
       ttCookieId: '',
-      ttTargetIdc: 'useast1a',
+      ttTargetIdc: 'alisg',
       csrfToken: '',
       msToken: '',
       callerUserId: '',
       callerSecUid: '',
       passportVerified: false,
-      passportNote: 'Not checked',
+      passportErrorCode: null,
+      passportNote: 'Not connected',
       accountName: '',
       autoBlockSharers: false,
     };
@@ -368,7 +370,7 @@ function broadcastGlobalBlacklist() {
 }
 
 // ============================================================================
-// TIKTOK COOKIE BUILDER + PASSPORT ACCOUNT VERIFIER
+// MULTI-IDC COOKIE BUILDER & PASSPORT AUTO-PROBER
 // ============================================================================
 let tiktokLib = null;
 async function getTikTokLib() {
@@ -399,33 +401,130 @@ async function acquireTikwmSlot() {
   if (waitMs > 0) await delay(waitMs);
 }
 
+function formatCookieWithIdc(baseCookie, idc, csrfToken, callerUserId, msToken) {
+  let c = baseCookie
+    .replace(/;\s*tt-target-idc=[^;]*/gi, '')
+    .replace(/;\s*store-idc=[^;]*/gi, '')
+    .trim();
+
+  if (callerUserId && !/uid_tt=/i.test(c)) {
+    c += `; uid_tt=${callerUserId}; uid_tt_ss=${callerUserId}`;
+  }
+  c += `; tt-target-idc=${idc}; store-idc=${idc}`;
+  if (!/tt_csrf_token=/i.test(c)) {
+    c += `; tt_csrf_token=${csrfToken}; passport_csrf_token=${csrfToken}`;
+  }
+  if (msToken && !/msToken=/i.test(c)) {
+    c += `; msToken=${msToken}`;
+  }
+  return c;
+}
+
+async function probePassportAcrossIdcs(baseCookie, explicitIdc) {
+  const idcList = explicitIdc
+    ? [explicitIdc, ...CONFIG.tiktok.candidateIdcs.filter((x) => x !== explicitIdc)]
+    : CONFIG.tiktok.candidateIdcs;
+
+  const probeResults = [];
+  let lastErrorCode = null;
+  let lastDescription = '';
+
+  for (const idc of idcList) {
+    const testCookie = `${baseCookie}; tt-target-idc=${idc}; store-idc=${idc}`;
+    try {
+      const pRes = await tiktokHttp.get(
+        'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=en&app_name=tiktok_web&device_platform=web_pc',
+        {
+          headers: {
+            Cookie: testCookie,
+            Referer: 'https://www.tiktok.com/',
+          },
+          timeout: 5500,
+        }
+      );
+
+      const d = pRes.data?.data;
+      const msg = pRes.data?.message;
+      const errCode = d?.error_code ?? null;
+      const desc = d?.description || '';
+      const uid = toNumericIdString(d?.user_id_str || d?.user_id);
+
+      probeResults.push({
+        idc,
+        httpStatus: pRes.status,
+        message: msg,
+        user_id_str: uid || null,
+        username: d?.username || d?.screen_name || null,
+        error_code: errCode,
+        description: desc || null,
+      });
+
+      if (msg === 'success' && uid) {
+        return {
+          verified: true,
+          winningIdc: idc,
+          callerUserId: uid,
+          callerSecUid: String(d?.sec_user_id || '').trim(),
+          callerUsername: String(d?.username || d?.screen_name || '').trim(),
+          errorCode: null,
+          note: `Verified @${d?.username || 'account'} (uid=${uid}, idc=${idc})`,
+          probeResults,
+          setCookies: pRes.headers?.['set-cookie'] || [],
+        };
+      }
+
+      lastErrorCode = errCode;
+      lastDescription = desc;
+    } catch (e) {
+      probeResults.push({ idc, error: e.message });
+    }
+  }
+
+  return {
+    verified: false,
+    winningIdc: explicitIdc || 'alisg',
+    callerUserId: '',
+    callerSecUid: '',
+    callerUsername: '',
+    errorCode: lastErrorCode,
+    note:
+      lastErrorCode === 13
+        ? 'SESSION EXPIRED (TikTok Error 13: "session expired, please sign in again") — Your sessionid is expired or missing full browser cookies. Grab a fresh Cookie from DevTools!'
+        : `Unverified session (${lastDescription || 'code ' + lastErrorCode})`,
+    probeResults,
+    setCookies: [],
+  };
+}
+
 async function buildTikTokCookieHeader(rawInput) {
-  const trimmed = String(rawInput ? rawInput : '').trim();
+  let trimmed = String(rawInput ? rawInput : '').trim();
+  // Strip accidental "Cookie:" prefix or surrounding quotes if user copied whole line from DevTools
+  trimmed = trimmed.replace(/^cookie\s*:\s*/i, '').replace(/^["']|["']$/g, '').trim();
+
   if (!trimmed) {
     return {
+      rawCookieInput: '',
       cookieHeader: '',
       ttCookieId: '',
-      ttTargetIdc: 'useast1a',
+      ttTargetIdc: 'alisg',
       csrfToken: '',
       msToken: '',
       callerUserId: '',
       callerSecUid: '',
       callerUsername: '',
       passportVerified: false,
+      passportErrorCode: null,
       passportNote: 'Empty cookie',
+      probeResults: [],
     };
   }
 
   let ttCookieId = '';
-  let ttTargetIdc = '';
-  let cookieHeader = '';
+  let explicitIdc = '';
+  let baseCookie = '';
   let csrfToken = '';
   let msToken = '';
   let callerUserId = '';
-  let callerSecUid = '';
-  let callerUsername = '';
-  let passportVerified = false;
-  let passportNote = '';
 
   if (trimmed.includes('=')) {
     const m =
@@ -434,106 +533,71 @@ async function buildTikTokCookieHeader(rawInput) {
       /sid_tt=([^;\s]+)/i.exec(trimmed);
     ttCookieId = m ? m[1] : '';
     const idcMatch = /(?:tt-target-idc|store-idc)=([^;\s]+)/i.exec(trimmed);
-    if (idcMatch) ttTargetIdc = idcMatch[1];
+    if (idcMatch) explicitIdc = idcMatch[1];
     const cm = /(?:tt_csrf_token|csrf_session_id|passport_csrf_token)=([^;\s]+)/i.exec(trimmed);
     if (cm) csrfToken = cm[1];
     const mm = /msToken=([^;\s]+)/i.exec(trimmed);
     if (mm) msToken = mm[1];
     const uidMatch = /uid_tt=([^;\s]+)/i.exec(trimmed);
     if (uidMatch) callerUserId = toNumericIdString(uidMatch[1]);
-    cookieHeader = trimmed;
+    baseCookie = trimmed;
   } else {
     ttCookieId = trimmed;
-    cookieHeader = `sessionid=${trimmed}; sessionid_ss=${trimmed}; sid_tt=${trimmed}`;
+    baseCookie = `sessionid=${trimmed}; sessionid_ss=${trimmed}; sid_tt=${trimmed}`;
   }
 
-  // Step 1: Query TikTok Passport Account Info to verify sessionid & get caller's uid_tt + IDC
-  try {
-    const passRes = await tiktokHttp.get(
-      'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=en&app_name=tiktok_web&device_platform=web_pc',
-      {
-        headers: {
-          Cookie: cookieHeader,
-          Referer: 'https://www.tiktok.com/',
-        },
-        timeout: 6500,
+  // Probe Passport across all TikTok Data Centers (alisg, maliva, eu-ttp2, useast2a, useast1a)
+  const probe = await probePassportAcrossIdcs(baseCookie, explicitIdc);
+
+  for (const sc of probe.setCookies || []) {
+    const cMatch = /(?:tt_csrf_token|passport_csrf_token)=([^;]+)/i.exec(sc);
+    if (cMatch && !csrfToken) csrfToken = cMatch[1];
+    const mMatch = /msToken=([^;]+)/i.exec(sc);
+    if (mMatch && !msToken) msToken = mMatch[1];
+  }
+
+  if (probe.callerUserId) callerUserId = probe.callerUserId;
+  const ttTargetIdc = probe.winningIdc || explicitIdc || 'alisg';
+
+  // Fetch /explore once if csrfToken or msToken still missing
+  if (!csrfToken || !msToken) {
+    try {
+      const res = await tiktokHttp.get('https://www.tiktok.com/explore', {
+        headers: { Cookie: `${baseCookie}; tt-target-idc=${ttTargetIdc}` },
+        timeout: 5000,
+      });
+      for (const sc of res.headers?.['set-cookie'] || []) {
+        const cMatch = /(?:tt_csrf_token|passport_csrf_token)=([^;]+)/i.exec(sc);
+        if (cMatch && !csrfToken) csrfToken = cMatch[1];
+        const mMatch = /msToken=([^;]+)/i.exec(sc);
+        if (mMatch && !msToken) msToken = mMatch[1];
       }
-    );
-
-    for (const sc of passRes.headers?.['set-cookie'] || []) {
-      const cMatch = /(?:tt_csrf_token|passport_csrf_token)=([^;]+)/i.exec(sc);
-      if (cMatch && !csrfToken) csrfToken = cMatch[1];
-      const mMatch = /msToken=([^;]+)/i.exec(sc);
-      if (mMatch && !msToken) msToken = mMatch[1];
-      const idcMatch = /(?:tt-target-idc|store-idc)=([^;]+)/i.exec(sc);
-      if (idcMatch && !ttTargetIdc) ttTargetIdc = idcMatch[1];
-    }
-
-    const headerIdc = passRes.headers?.['x-tt-store-idc'] || passRes.headers?.['x-tt-target-idc'];
-    if (headerIdc && !ttTargetIdc) ttTargetIdc = String(headerIdc).trim();
-
-    const passData = passRes.data?.data;
-    if (passRes.data?.message === 'success' && passData) {
-      callerUserId = toNumericIdString(passData.user_id_str || passData.user_id) || callerUserId;
-      callerSecUid = String(passData.sec_user_id || '').trim();
-      callerUsername = String(passData.username || passData.screen_name || '').trim();
-      passportVerified = Boolean(callerUserId);
-      passportNote = `Verified @${callerUsername || 'user'} (uid=${callerUserId}, idc=${ttTargetIdc || 'auto'})`;
-    } else {
-      passportNote = `Passport response: ${JSON.stringify(passRes.data || {}).slice(0, 140)}`;
-    }
-  } catch (e) {
-    passportNote = `Passport check error: ${e.message}`;
+    } catch (e) {}
   }
 
-  // Step 2: Fetch /explore for csrfToken / msToken / tt-target-idc if still missing
-  try {
-    const res = await tiktokHttp.get('https://www.tiktok.com/explore', {
-      headers: { Cookie: cookieHeader },
-      timeout: 5500,
-    });
-    for (const sc of res.headers?.['set-cookie'] || []) {
-      const cMatch = /(?:tt_csrf_token|passport_csrf_token)=([^;]+)/i.exec(sc);
-      if (cMatch && !csrfToken) csrfToken = cMatch[1];
-      const mMatch = /msToken=([^;]+)/i.exec(sc);
-      if (mMatch && !msToken) msToken = mMatch[1];
-      const idcMatch = /(?:tt-target-idc|store-idc)=([^;]+)/i.exec(sc);
-      if (idcMatch && !ttTargetIdc) ttTargetIdc = idcMatch[1];
-    }
-  } catch (e) {}
-
-  if (!ttTargetIdc) ttTargetIdc = 'useast1a';
   if (!csrfToken) csrfToken = crypto.randomBytes(16).toString('hex');
 
-  if (callerUserId && !cookieHeader.includes('uid_tt=')) {
-    cookieHeader += `; uid_tt=${callerUserId}; uid_tt_ss=${callerUserId}`;
-  }
-  if (!cookieHeader.includes('tt-target-idc=')) {
-    cookieHeader += `; tt-target-idc=${ttTargetIdc}; store-idc=${ttTargetIdc}`;
-  }
-  if (!cookieHeader.includes('tt_csrf_token=')) {
-    cookieHeader += `; tt_csrf_token=${csrfToken}; passport_csrf_token=${csrfToken}`;
-  }
-  if (msToken && !cookieHeader.includes('msToken=')) {
-    cookieHeader += `; msToken=${msToken}`;
-  }
+  const cookieHeader = formatCookieWithIdc(baseCookie, ttTargetIdc, csrfToken, callerUserId, msToken);
 
   return {
+    rawCookieInput: baseCookie,
     cookieHeader,
     ttCookieId,
     ttTargetIdc,
     csrfToken,
     msToken,
     callerUserId,
-    callerSecUid,
-    callerUsername,
-    passportVerified,
-    passportNote,
+    callerSecUid: probe.callerSecUid,
+    callerUsername: probe.callerUsername,
+    passportVerified: probe.verified,
+    passportErrorCode: probe.errorCode,
+    passportNote: probe.note,
+    probeResults: probe.probeResults,
   };
 }
 
 // ============================================================================
-// PROFILE RESOLUTION (WITH LAYER-BY-LAYER DIAGNOSTIC TRACE)
+// PROFILE RESOLUTION (WEB REHYDRATION IS NOW LAYER 1 PRIMARY!)
 // ============================================================================
 function isSocialSharePacket(data) {
   if (!data || typeof data !== 'object') return false;
@@ -572,10 +636,6 @@ function extractShareUser(data) {
   return { uniqueId, nickname, userId, secUid, profilePictureUrl: pfp };
 }
 
-/**
- * Resolves a TikTok @username and returns both the resolved IDs and a detailed
- * trace of what each layer returned for the Error Scanner.
- */
 async function resolveTikTokUserProfileDetailed(session, uniqueId, { bypassCache = false } = {}) {
   const clean = normalizeTikTokHandle(uniqueId).toLowerCase();
   const trace = {
@@ -623,84 +683,49 @@ async function resolveTikTokUserProfileDetailed(session, uniqueId, { bypassCache
   let foundUserId = '';
   let foundSecUid = '';
 
-  // LAYER 1: TikWM Public User Info API
-  for (let twTry = 1; twTry <= 2; twTry++) {
-    try {
-      await acquireTikwmSlot();
-      const twStart = Date.now();
-      const twRes = await tiktokHttp.get(
-        `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(clean)}`,
-        { timeout: 6500, headers: { Accept: 'application/json' } }
-      );
-      const u = twRes.data?.data?.user;
-      const uid = toNumericIdString(u?.id);
-      const sec = String(u?.secUid || '').trim();
-      trace.layers[`L1_TikWM_try${twTry}`] = {
-        httpStatus: twRes.status,
-        apiCode: twRes.data?.code,
-        apiMsg: twRes.data?.msg,
-        resolvedUniqueId: u?.uniqueId || null,
+  // LAYER 1 (PRIMARY): TikTok @username HTML Rehydration JSON (64-bit safe, immune to TikWM 403)
+  try {
+    const l1Start = Date.now();
+    const resHtml = await tiktokHttp.get(`https://www.tiktok.com/@${encodeURIComponent(clean)}`, {
+      timeout: 6500,
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    const html = typeof resHtml.data === 'string' ? resHtml.data : '';
+    const scriptMatch = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    if (scriptMatch && scriptMatch[1]) {
+      const jsonData = parseJsonSafe64(scriptMatch[1]);
+      const userInfo = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo;
+      const statusCode = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.statusCode;
+      const userDetail = userInfo?.user;
+      const uid = toNumericIdString(userDetail?.idStr || userDetail?.id);
+      const sec = String(userDetail?.secUid || '').trim();
+      trace.layers.L1_WebRehydration = {
+        httpStatus: resHtml.status,
+        webappStatusCode: statusCode,
+        resolvedUniqueId: userDetail?.uniqueId || null,
         userId: uid || null,
         secUidPrefix: sec ? `${sec.slice(0, 18)}...` : null,
-        elapsedMs: Date.now() - twStart,
+        elapsedMs: Date.now() - l1Start,
       };
-      if (twRes.data?.code === -1 && twTry === 1) {
-        await delay(1150);
-        continue;
-      }
       if (uid) foundUserId = uid;
       if (isValidSecUid(sec)) foundSecUid = sec;
-      break;
-    } catch (e) {
-      trace.layers[`L1_TikWM_try${twTry}`] = { error: e.message };
+    } else {
+      trace.layers.L1_WebRehydration = {
+        httpStatus: resHtml.status,
+        note: 'No __UNIVERSAL_DATA_FOR_REHYDRATION__ script tag in HTML',
+        htmlLength: html.length,
+      };
     }
+  } catch (e) {
+    trace.layers.L1_WebRehydration = { error: e.message };
   }
 
-  // LAYER 2: TikTok @username HTML Rehydration JSON (using 64-bit safe parser!)
+  // LAYER 2: TikTok API-Live User Room Endpoint
   if (!foundUserId || !foundSecUid || bypassCache) {
     try {
       const l2Start = Date.now();
-      const resHtml = await tiktokHttp.get(`https://www.tiktok.com/@${encodeURIComponent(clean)}`, {
-        timeout: 6500,
-        headers: {
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-      });
-      const html = typeof resHtml.data === 'string' ? resHtml.data : '';
-      const scriptMatch = /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/i.exec(html);
-      if (scriptMatch && scriptMatch[1]) {
-        const jsonData = parseJsonSafe64(scriptMatch[1]);
-        const userInfo = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo;
-        const statusCode = jsonData?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.statusCode;
-        const userDetail = userInfo?.user;
-        const uid = toNumericIdString(userDetail?.idStr || userDetail?.id);
-        const sec = String(userDetail?.secUid || '').trim();
-        trace.layers.L2_WebRehydration = {
-          httpStatus: resHtml.status,
-          webappStatusCode: statusCode,
-          resolvedUniqueId: userDetail?.uniqueId || null,
-          userId: uid || null,
-          secUidPrefix: sec ? `${sec.slice(0, 18)}...` : null,
-          elapsedMs: Date.now() - l2Start,
-        };
-        if (uid && !foundUserId) foundUserId = uid;
-        if (isValidSecUid(sec) && !foundSecUid) foundSecUid = sec;
-      } else {
-        trace.layers.L2_WebRehydration = {
-          httpStatus: resHtml.status,
-          note: 'No __UNIVERSAL_DATA_FOR_REHYDRATION__ script tag in HTML (WAF/Captcha or non-existent user)',
-          htmlLength: html.length,
-        };
-      }
-    } catch (e) {
-      trace.layers.L2_WebRehydration = { error: e.message };
-    }
-  }
-
-  // LAYER 3: TikTok API-Live User Room Endpoint
-  if (!foundUserId || !foundSecUid || bypassCache) {
-    try {
-      const l3Start = Date.now();
       const apiRes = await tiktokHttp.get(
         `https://www.tiktok.com/api-live/user/room/?aid=1988&uniqueId=${encodeURIComponent(clean)}&sourceType=54`,
         {
@@ -713,18 +738,45 @@ async function resolveTikTokUserProfileDetailed(session, uniqueId, { bypassCache
       const u = apiRes.data?.data?.user;
       const uid = toNumericIdString(u?.idStr || u?.id);
       const sec = String(u?.secUid || '').trim();
-      trace.layers.L3_ApiLiveRoom = {
+      trace.layers.L2_ApiLiveRoom = {
         httpStatus: apiRes.status,
         statusCode: apiRes.data?.statusCode ?? apiRes.data?.status_code,
         resolvedUniqueId: u?.uniqueId || null,
         userId: uid || null,
         secUidPrefix: sec ? `${sec.slice(0, 18)}...` : null,
-        elapsedMs: Date.now() - l3Start,
+        elapsedMs: Date.now() - l2Start,
       };
       if (uid && !foundUserId) foundUserId = uid;
       if (isValidSecUid(sec) && !foundSecUid) foundSecUid = sec;
     } catch (e) {
-      trace.layers.L3_ApiLiveRoom = { error: e.message };
+      trace.layers.L2_ApiLiveRoom = { error: e.message };
+    }
+  }
+
+  // LAYER 3: TikWM Public User Info API (Fallback if Layer 1 & 2 miss)
+  if (!foundUserId || !foundSecUid || bypassCache) {
+    try {
+      await acquireTikwmSlot();
+      const twStart = Date.now();
+      const twRes = await tiktokHttp.get(
+        `https://www.tikwm.com/api/user/info?unique_id=${encodeURIComponent(clean)}`,
+        { timeout: 6000, headers: { Accept: 'application/json' } }
+      );
+      const u = twRes.data?.data?.user;
+      const uid = toNumericIdString(u?.id);
+      const sec = String(u?.secUid || '').trim();
+      trace.layers.L3_TikWM = {
+        httpStatus: twRes.status,
+        apiCode: twRes.data?.code,
+        resolvedUniqueId: u?.uniqueId || null,
+        userId: uid || null,
+        secUidPrefix: sec ? `${sec.slice(0, 18)}...` : null,
+        elapsedMs: Date.now() - twStart,
+      };
+      if (uid && !foundUserId) foundUserId = uid;
+      if (isValidSecUid(sec) && !foundSecUid) foundSecUid = sec;
+    } catch (e) {
+      trace.layers.L3_TikWM = { error: e.message };
     }
   }
 
@@ -765,7 +817,7 @@ async function signTikTokUrlIfPossible(targetUrl) {
 }
 
 // ============================================================================
-// MULTI-VECTOR BLOCK ENGINE + DEEP SCANNER
+// MULTI-IDC & MULTI-VECTOR BLOCK ENGINE
 // ============================================================================
 
 function isTikTokBlockSuccess(httpStatus, data) {
@@ -775,26 +827,21 @@ function isTikTokBlockSuccess(httpStatus, data) {
   return false;
 }
 
-/**
- * Executes up to 5 distinct TikTok Block API vectors.
- * If stopOnFirstSuccess is true (normal blocking), returns immediately when any vector succeeds.
- * If stopOnFirstSuccess is false (Error Scanner), tests and records results or stops after first success with full trace.
- */
 async function executeBlockVectors(session, { cleanUsername, targetUserId, targetSecUid, stopOnFirstSuccess = true }) {
   const csrfToken = session.auth.csrfToken || crypto.randomBytes(16).toString('hex');
-  const idc = session.auth.ttTargetIdc || 'useast1a';
+  const rawBaseCookie = session.auth.rawCookieInput || session.auth.cookieHeader;
 
-  const baseWebHeaders = {
+  const makeHeadersForIdc = (idc) => ({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     Accept: 'application/json, text/plain, */*',
     'Content-Type': 'application/x-www-form-urlencoded',
     Origin: 'https://www.tiktok.com',
     Referer: `https://www.tiktok.com/@${cleanUsername}`,
-    Cookie: session.auth.cookieHeader,
+    Cookie: formatCookieWithIdc(rawBaseCookie, idc, csrfToken, session.auth.callerUserId, session.auth.msToken),
     'x-secsdk-csrf-token': csrfToken,
     'tt-csrf-token': csrfToken,
     'x-tt-passport-csrf-token': csrfToken,
-  };
+  });
 
   const baseWebParams = {
     WebIdLastTime: String(Math.floor(Date.now() / 1000)),
@@ -816,176 +863,91 @@ async function executeBlockVectors(session, { cleanUsername, targetUserId, targe
     is_fullscreen: 'false',
     is_page_visible: 'true',
     os: 'windows',
-    priority_region: 'US',
+    priority_region: 'GE',
     referer: `https://www.tiktok.com/@${cleanUsername}`,
-    region: 'US',
+    region: 'GE',
     screen_height: '1080',
     screen_width: '1920',
-    tz_name: 'UTC',
+    tz_name: 'Asia/Tbilisi',
     webcast_language: 'en',
     ...(session.auth.msToken ? { msToken: session.auth.msToken } : {}),
   };
 
-  const vectorResults = [];
+  const buildStandardUrlAndBody = () => {
+    const q = new URLSearchParams({
+      ...baseWebParams,
+      blockType: '1',
+      block_type: '1',
+      source: '0',
+      ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid, target_sec_uid: targetSecUid } : {}),
+      ...(targetUserId ? { userId: targetUserId, user_id: targetUserId, target_uid: targetUserId } : {}),
+    });
+    const body = new URLSearchParams({
+      blockType: '1',
+      block_type: '1',
+      source: '0',
+      ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid } : {}),
+      ...(targetUserId ? { userId: targetUserId, user_id: targetUserId } : {}),
+    });
+    return { url: `https://www.tiktok.com/api/user/block/?${q.toString()}`, body: body.toString() };
+  };
 
-  // Vector definitions
+  const primaryIdc = session.auth.ttTargetIdc || 'alisg';
   const vectors = [
     {
-      name: 'V1_WEB_CAMEL_CLEAN',
-      description: 'TikTok Web V1 (Exact camelCase secUid + userId + blockType=1)',
+      name: `V1_WEB_${primaryIdc.toUpperCase()}`,
+      description: `TikTok Web V1 Signed on primary IDC (${primaryIdc})`,
       run: async () => {
-        const q = new URLSearchParams({
-          ...baseWebParams,
-          blockType: '1',
-          ...(targetSecUid ? { secUid: targetSecUid } : {}),
-          ...(targetUserId ? { userId: targetUserId } : {}),
-          source: '0',
-        });
-        const body = new URLSearchParams({
-          blockType: '1',
-          ...(targetSecUid ? { secUid: targetSecUid } : {}),
-          ...(targetUserId ? { userId: targetUserId } : {}),
-          source: '0',
-        });
-        const url = `https://www.tiktok.com/api/user/block/?${q.toString()}`;
-        return await tiktokHttp.post(url, body.toString(), {
-          headers: baseWebHeaders,
+        const { url, body } = buildStandardUrlAndBody();
+        const signedUrl = await signTikTokUrlIfPossible(url);
+        return await tiktokHttp.post(signedUrl, body, {
+          headers: makeHeadersForIdc(primaryIdc),
           timeout: CONFIG.tiktok.blockTimeoutMs,
         });
       },
     },
     {
-      name: 'V2_WEB_SIGNED_HYBRID',
-      description: 'TikTok Web V1 Signed URL (Both camelCase & snake_case params)',
+      name: 'V2_WEB_ALISG_CLUSTER',
+      description: 'TikTok Web V1 on ALISG Global Data Center (store-idc=alisg)',
+      skip: primaryIdc === 'alisg',
       run: async () => {
-        const q = new URLSearchParams({
-          ...baseWebParams,
-          blockType: '1',
-          block_type: '1',
-          source: '0',
-          ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid, target_sec_uid: targetSecUid } : {}),
-          ...(targetUserId ? { userId: targetUserId, user_id: targetUserId, target_uid: targetUserId } : {}),
-        });
-        const body = new URLSearchParams({
-          blockType: '1',
-          block_type: '1',
-          source: '0',
-          ...(targetSecUid ? { secUid: targetSecUid, sec_user_id: targetSecUid } : {}),
-          ...(targetUserId ? { userId: targetUserId, user_id: targetUserId } : {}),
-        });
-        const unsignedUrl = `https://www.tiktok.com/api/user/block/?${q.toString()}`;
-        const signedUrl = await signTikTokUrlIfPossible(unsignedUrl);
-        return await tiktokHttp.post(signedUrl, body.toString(), {
-          headers: baseWebHeaders,
+        const { url, body } = buildStandardUrlAndBody();
+        return await tiktokHttp.post(url, body, {
+          headers: makeHeadersForIdc('alisg'),
           timeout: CONFIG.tiktok.blockTimeoutMs,
         });
       },
     },
     {
-      name: 'V3_WEB_SECUID_ONLY',
-      description: 'TikTok Web V1 using ONLY secUid (omits numeric userId)',
-      skip: !targetSecUid,
+      name: 'V3_WEB_MALIVA_CLUSTER',
+      description: 'TikTok Web V1 on MALIVA Europe Data Center (store-idc=maliva)',
+      skip: primaryIdc === 'maliva',
       run: async () => {
-        const q = new URLSearchParams({
-          ...baseWebParams,
-          blockType: '1',
-          secUid: targetSecUid,
-          sec_user_id: targetSecUid,
-          source: '0',
-        });
-        const body = new URLSearchParams({
-          blockType: '1',
-          secUid: targetSecUid,
-          sec_user_id: targetSecUid,
-          source: '0',
-        });
-        const url = `https://www.tiktok.com/api/user/block/?${q.toString()}`;
-        return await tiktokHttp.post(url, body.toString(), {
-          headers: baseWebHeaders,
+        const { url, body } = buildStandardUrlAndBody();
+        return await tiktokHttp.post(url, body, {
+          headers: makeHeadersForIdc('maliva'),
           timeout: CONFIG.tiktok.blockTimeoutMs,
         });
       },
     },
     {
-      name: 'V4_WEB_USERID_ONLY',
-      description: 'TikTok Web V1 using ONLY numeric userId (omits secUid)',
-      skip: !targetUserId,
+      name: 'V4_WEB_EUTTP2_CLUSTER',
+      description: 'TikTok Web V1 on EU-TTP2 Data Center (store-idc=eu-ttp2)',
+      skip: primaryIdc === 'eu-ttp2',
       run: async () => {
-        const q = new URLSearchParams({
-          ...baseWebParams,
-          blockType: '1',
-          userId: targetUserId,
-          user_id: targetUserId,
-          source: '0',
-        });
-        const body = new URLSearchParams({
-          blockType: '1',
-          userId: targetUserId,
-          user_id: targetUserId,
-          source: '0',
-        });
-        const url = `https://www.tiktok.com/api/user/block/?${q.toString()}`;
-        return await tiktokHttp.post(url, body.toString(), {
-          headers: baseWebHeaders,
+        const { url, body } = buildStandardUrlAndBody();
+        return await tiktokHttp.post(url, body, {
+          headers: makeHeadersForIdc('eu-ttp2'),
           timeout: CONFIG.tiktok.blockTimeoutMs,
         });
-      },
-    },
-    {
-      name: 'V5_MOBILE_AWEME_V1',
-      description: `TikTok Mobile Aweme V1 (api16-normal-c-${idc} / alisg / useast1a)`,
-      run: async () => {
-        const mQuery = new URLSearchParams({
-          aid: '1233',
-          app_name: 'musical_ly',
-          version_code: '350103',
-          device_platform: 'android',
-          os: 'android',
-          block_type: '1',
-          source: '0',
-          ...(targetSecUid ? { sec_user_id: targetSecUid } : {}),
-          ...(targetUserId ? { user_id: targetUserId } : {}),
-        });
-        const hosts = [
-          `https://api16-normal-c-${idc}.tiktokv.com`,
-          'https://api22-normal-c-alisg.tiktokv.com',
-          'https://api16-normal-c-useast1a.tiktokv.com',
-        ];
-        let lastRes = null;
-        for (const host of [...new Set(hosts)]) {
-          try {
-            const resMob = await tiktokHttp.post(
-              `${host}/aweme/v1/user/block/?${mQuery.toString()}`,
-              mQuery.toString(),
-              {
-                headers: {
-                  'User-Agent': 'com.zhiliaoapp.musically/2023501030 (Linux; U; Android 13; en_US; Pixel 8; Build/UQ1A.240205.004)',
-                  Accept: 'application/json',
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Cookie: session.auth.cookieHeader,
-                },
-                timeout: 5500,
-              }
-            );
-            lastRes = resMob;
-            if (isTikTokBlockSuccess(resMob.status, resMob.data)) return resMob;
-          } catch (e) {}
-        }
-        return lastRes || { status: 0, data: { status_msg: 'Mobile hosts unreachable' } };
       },
     },
   ];
 
-  for (const vec of vectors) {
-    if (vec.skip) {
-      vectorResults.push({
-        vector: vec.name,
-        skipped: true,
-        reason: 'Missing required ID for this vector',
-      });
-      continue;
-    }
+  const vectorResults = [];
 
+  for (const vec of vectors) {
+    if (vec.skip) continue;
     const vStart = Date.now();
     try {
       const res = await vec.run();
@@ -993,7 +955,7 @@ async function executeBlockVectors(session, { cleanUsername, targetUserId, targe
       const statusCode = res.data?.status_code ?? res.data?.statusCode ?? null;
       const statusMsg = res.data?.status_msg || res.data?.message || (ok ? 'OK' : `HTTP ${res.status}`);
 
-      const entry = {
+      vectorResults.push({
         vector: vec.name,
         description: vec.description,
         httpStatus: res.status,
@@ -1002,12 +964,7 @@ async function executeBlockVectors(session, { cleanUsername, targetUserId, targe
         statusMsg,
         rawResponse: res.data,
         elapsedMs: Date.now() - vStart,
-      };
-      vectorResults.push(entry);
-
-      log.info(
-        `[${session.username}] [${vec.name}] @${cleanUsername} (uid=${targetUserId || 'none'}, sec=${targetSecUid ? 'yes' : 'no'}) -> HTTP ${res.status} code=${statusCode} msg="${statusMsg}"`
-      );
+      });
 
       if (ok && stopOnFirstSuccess) {
         return { blockedOnTikTok: true, winningVector: vec.name, vectorResults };
@@ -1021,7 +978,7 @@ async function executeBlockVectors(session, { cleanUsername, targetUserId, targe
         elapsedMs: Date.now() - vStart,
       });
     }
-    await delay(220);
+    await delay(180);
   }
 
   const anySuccess = vectorResults.find((v) => v.success);
@@ -1029,14 +986,21 @@ async function executeBlockVectors(session, { cleanUsername, targetUserId, targe
     return { blockedOnTikTok: true, winningVector: anySuccess.vector, vectorResults };
   }
 
-  const summaryErrors = vectorResults
-    .filter((v) => !v.skipped)
-    .map((v) => `${v.vector.replace('_WEB_', ':')}=${v.statusCode ?? 'ERR'}(${v.statusMsg || v.error || '?'})`)
-    .join(' | ');
+  // Check if all vectors returned status_code=2 ("User ID Invalid") because the caller's session cookie is expired
+  const allCode2 = vectorResults.length > 0 && vectorResults.every((v) => v.statusCode === 2);
+  let humanDiagnosis = '';
+  if (allCode2 && !session.auth.passportVerified) {
+    humanDiagnosis =
+      'YOUR TIKTOK COOKIE IS EXPIRED (TikTok Error 13: "session expired, please sign in again") -> Click "TikTok Account" and paste a fresh Cookie!';
+  } else {
+    humanDiagnosis = vectorResults
+      .map((v) => `${v.vector}=${v.statusCode ?? 'ERR'}(${v.statusMsg || v.error || '?'})`)
+      .join(' | ');
+  }
 
   return {
     blockedOnTikTok: false,
-    note: summaryErrors || 'All vectors failed',
+    note: humanDiagnosis,
     vectorResults,
   };
 }
@@ -1063,7 +1027,7 @@ async function blockTikTokUserOnAccount(session, userObj) {
   }
 
   if (!targetSecUid && !targetUserId) {
-    const missNote = `Resolver could not find @${cleanUsername} (check username spelling or open Error Scanner)`;
+    const missNote = `Resolver could not find @${cleanUsername}`;
     session.recordDiagnostic({
       username: cleanUsername,
       userId: 'NONE',
@@ -1096,19 +1060,18 @@ async function blockTikTokUserOnAccount(session, userObj) {
     return { blockedOnTikTok: true };
   }
 
-  const detailedNote = `[uid:${targetUserId || 'NONE'} sec:${targetSecUid ? 'YES' : 'NONE'} callerUid:${session.auth.callerUserId || 'NONE'}] ${execRes.note}`;
   session.recordDiagnostic({
     username: cleanUsername,
     userId: targetUserId || 'NONE',
     secUid: targetSecUid ? `${targetSecUid.slice(0, 14)}...` : 'NONE',
     success: false,
-    vector: 'ALL_5_FAILED',
-    note: detailedNote,
+    vector: 'FAILED',
+    note: execRes.note,
     vectorResults: execRes.vectorResults,
     elapsedMs: Date.now() - startMs,
   });
 
-  return { blockedOnTikTok: false, note: detailedNote };
+  return { blockedOnTikTok: false, note: execRes.note };
 }
 
 async function runParallelTikTokBlockBatch(session, usernames) {
@@ -1257,6 +1220,7 @@ app.get('/api/tiktok/stream', (req, res) => {
         accountName: req.session.auth.accountName,
         autoBlockSharers: req.session.auth.autoBlockSharers,
         passportVerified: req.session.auth.passportVerified,
+        passportErrorCode: req.session.auth.passportErrorCode,
         passportNote: req.session.auth.passportNote,
         callerUserId: req.session.auth.callerUserId,
       },
@@ -1286,25 +1250,29 @@ app.post(
     }
 
     req.session.auth.loggedIn = true;
+    req.session.auth.rawCookieInput = parsed.rawCookieInput;
     req.session.auth.cookieHeader = parsed.cookieHeader;
     req.session.auth.ttCookieId = parsed.ttCookieId;
-    req.session.auth.ttTargetIdc = parsed.ttTargetIdc || 'useast1a';
+    req.session.auth.ttTargetIdc = parsed.ttTargetIdc || 'alisg';
     req.session.auth.csrfToken = parsed.csrfToken;
     req.session.auth.msToken = parsed.msToken;
     req.session.auth.callerUserId = parsed.callerUserId;
     req.session.auth.callerSecUid = parsed.callerSecUid;
     req.session.auth.passportVerified = parsed.passportVerified;
+    req.session.auth.passportErrorCode = parsed.passportErrorCode;
     req.session.auth.passportNote = parsed.passportNote;
     req.session.auth.accountName =
-      normalizeTikTokHandle(accountName) || parsed.callerUsername || 'TikTok Account';
+      parsed.callerUsername || normalizeTikTokHandle(accountName) || 'TikTok Account';
 
     const payload = {
       loggedIn: true,
       accountName: req.session.auth.accountName,
       autoBlockSharers: req.session.auth.autoBlockSharers,
       passportVerified: req.session.auth.passportVerified,
+      passportErrorCode: req.session.auth.passportErrorCode,
       passportNote: req.session.auth.passportNote,
       callerUserId: req.session.auth.callerUserId,
+      ttTargetIdc: req.session.auth.ttTargetIdc,
     };
     req.session.broadcast({ type: 'AUTH', auth: payload });
     res.json({ success: true, auth: payload });
@@ -1314,14 +1282,16 @@ app.post(
 app.post('/api/tiktok/logout', (req, res) => {
   req.session.auth = {
     loggedIn: false,
+    rawCookieInput: '',
     cookieHeader: '',
     ttCookieId: '',
-    ttTargetIdc: 'useast1a',
+    ttTargetIdc: 'alisg',
     csrfToken: '',
     msToken: '',
     callerUserId: '',
     callerSecUid: '',
     passportVerified: false,
+    passportErrorCode: null,
     passportNote: 'Logged out',
     accountName: '',
     autoBlockSharers: false,
@@ -1339,6 +1309,7 @@ app.post('/api/tiktok/auto-block', (req, res) => {
       accountName: req.session.auth.accountName,
       autoBlockSharers: req.session.auth.autoBlockSharers,
       passportVerified: req.session.auth.passportVerified,
+      passportErrorCode: req.session.auth.passportErrorCode,
       passportNote: req.session.auth.passportNote,
     },
   });
@@ -1364,69 +1335,51 @@ app.post('/api/tiktok/blacklist/clear', (req, res) => {
   res.json({ success: true, total: 0, usernames: [] });
 });
 
-/**
- * DEEP ERROR SCANNER ENDPOINT
- * Tests cookie auth against TikTok Passport, runs all 3 profile resolution layers,
- * and tests all 5 block vectors against the target username, returning the full raw report.
- */
 app.post(
   '/api/tiktok/scan',
   asyncRoute(async (req, res) => {
     const rawTarget = req.body?.username || req.session.lastFailedUsername || '';
     const cleanTarget = normalizeTikTokHandle(rawTarget).toLowerCase();
 
-    // 1. Check Cookie & Passport Live
-    let passportLive = null;
-    if (req.session.auth.cookieHeader) {
-      try {
-        const pRes = await tiktokHttp.get(
-          'https://www.tiktok.com/passport/web/account/info/?aid=1459&app_language=en&app_name=tiktok_web&device_platform=web_pc',
-          {
-            headers: { Cookie: req.session.auth.cookieHeader, Referer: 'https://www.tiktok.com/' },
-            timeout: 6000,
-          }
-        );
-        passportLive = {
-          httpStatus: pRes.status,
-          message: pRes.data?.message,
-          user_id_str: toNumericIdString(pRes.data?.data?.user_id_str || pRes.data?.data?.user_id),
-          username: pRes.data?.data?.username || pRes.data?.data?.screen_name || null,
-          error_code: pRes.data?.data?.error_code ?? null,
-          description: pRes.data?.data?.description ?? null,
-          storeIdcHeader: pRes.headers?.['x-tt-store-idc'] || null,
-        };
-      } catch (e) {
-        passportLive = { error: e.message };
-      }
+    const baseCookie = req.session.auth.rawCookieInput || req.session.auth.cookieHeader;
+    const idcProbe = baseCookie
+      ? await probePassportAcrossIdcs(baseCookie, req.session.auth.ttTargetIdc)
+      : null;
+
+    if (idcProbe?.verified) {
+      req.session.auth.passportVerified = true;
+      req.session.auth.callerUserId = idcProbe.callerUserId;
+      req.session.auth.ttTargetIdc = idcProbe.winningIdc;
+      req.session.auth.passportNote = idcProbe.note;
     }
 
+    const rootCauseDiagnosis = !req.session.auth.cookieHeader
+      ? 'NO COOKIE SAVED: Click "TikTok Account" and paste your TikTok Cookie.'
+      : !idcProbe?.verified
+        ? 'ROOT CAUSE FOUND: Your TikTok Cookie is EXPIRED or INVALID (TikTok Passport returned error_code=13 "session expired, please sign in again" across all 5 global data centers). Because your session is logged out, TikTok sees your caller User ID as 0 and returns "User ID Invalid" when you try to block anyone. SOLUTION: Log into tiktok.com on your browser, open DevTools (F12) -> Application -> Cookies -> https://www.tiktok.com, copy a fresh sessionid (or full Cookie header from Network tab), and save it in "TikTok Account".'
+        : 'COOKIE VERIFIED OK: Your TikTok session is active and authenticated.';
+
     const cookieSummary = {
-      loggedInFlag: req.session.auth.loggedIn,
-      cookieLength: req.session.auth.cookieHeader.length,
-      hasSessionId: /sessionid=/i.test(req.session.auth.cookieHeader),
-      hasSidTt: /sid_tt=/i.test(req.session.auth.cookieHeader),
-      hasUidTt: /uid_tt=/i.test(req.session.auth.cookieHeader),
-      hasCsrf: /tt_csrf_token=/i.test(req.session.auth.cookieHeader),
-      hasMsToken: /msToken=/i.test(req.session.auth.cookieHeader),
-      ttTargetIdc: req.session.auth.ttTargetIdc,
-      callerUserId: req.session.auth.callerUserId || null,
-      passportLive,
+      rootCauseDiagnosis,
+      passportVerified: Boolean(idcProbe?.verified),
+      callerUserId: idcProbe?.callerUserId || req.session.auth.callerUserId || null,
+      callerUsername: idcProbe?.callerUsername || null,
+      winningIdc: idcProbe?.winningIdc || req.session.auth.ttTargetIdc,
+      idcProbeResults: idcProbe?.probeResults || [],
     };
 
     if (!cleanTarget) {
       return res.json({
         scannedAt: new Date().toISOString(),
         cookieSummary,
-        note: 'No target @username provided to scan. Type a username in the scanner input and click Run Deep Scan.',
+        note: 'Enter a target @username and click Run Deep Scan to also test profile resolution and blocking.',
       });
     }
 
-    // 2. Run all 3 Profile Resolver Layers (bypassing cache to test live)
     const resolved = await resolveTikTokUserProfileDetailed(req.session, cleanTarget, {
       bypassCache: true,
     });
 
-    // 3. Test Block Vectors if logged in and resolved
     let blockTest = null;
     if (!req.session.auth.loggedIn || !req.session.auth.cookieHeader) {
       blockTest = { skipped: true, reason: 'Not logged into TikTok Account (Cookie missing)' };
@@ -1450,7 +1403,6 @@ app.post(
       cookieSummary,
       resolverReport: resolved.trace,
       blockTest,
-      recentDiagnostics: req.session.diagnosticHistory.slice(-10).reverse(),
     });
   })
 );
@@ -1573,6 +1525,7 @@ app.get('/api/tiktok/diagnostics', (req, res) => {
       accountName: req.session.auth.accountName,
       hasCookieId: Boolean(req.session.auth.ttCookieId),
       passportVerified: req.session.auth.passportVerified,
+      passportErrorCode: req.session.auth.passportErrorCode,
       passportNote: req.session.auth.passportNote,
       callerUserId: req.session.auth.callerUserId,
       ttTargetIdc: req.session.auth.ttTargetIdc,
@@ -1609,9 +1562,9 @@ app.post(
         requestPollingIntervalMs: 700,
       };
       if (CONFIG.eulerApiKey) options.signApiKey = CONFIG.eulerApiKey;
-      if (req.session.auth.loggedIn && req.session.auth.ttCookieId) {
+      if (req.session.auth.passportVerified && req.session.auth.ttCookieId) {
         options.sessionId = req.session.auth.ttCookieId;
-        options.ttTargetIdc = req.session.auth.ttTargetIdc || 'useast1a';
+        options.ttTargetIdc = req.session.auth.ttTargetIdc || 'alisg';
       }
 
       const conn = new TikTokLiveConnection(rawUsername, options);
@@ -1699,6 +1652,7 @@ app.get('/api/tiktok/sharers', (req, res) => {
       accountName: req.session.auth.accountName,
       autoBlockSharers: req.session.auth.autoBlockSharers,
       passportVerified: req.session.auth.passportVerified,
+      passportErrorCode: req.session.auth.passportErrorCode,
       passportNote: req.session.auth.passportNote,
       callerUserId: req.session.auth.callerUserId,
     },
